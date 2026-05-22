@@ -14,7 +14,7 @@ from agent.tool_dispatch_helpers import (
     make_tool_result_message,
 )
 from tools.terminal_tool import get_active_env
-from tools.tool_result_storage import maybe_persist_tool_result
+from tools.tool_result_storage import enforce_turn_budget, maybe_persist_tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -143,4 +143,45 @@ def finalize_tool_result(agent, ctx: ToolResultContext) -> FinalizedToolResult:
     )
 
 
-__all__ = ["FinalizedToolResult", "ToolResultContext", "finalize_tool_result"]
+def finalize_tool_results(agent, contexts: list[ToolResultContext]) -> list[FinalizedToolResult]:
+    """Finalize a batch of tool results and run batch-level result handling."""
+    finalized = [finalize_tool_result(agent, ctx) for ctx in contexts]
+    if contexts:
+        finalize_tool_result_batch(agent, contexts[0].messages, len(contexts), contexts[0].task_id)
+    return finalized
+
+
+def finalize_tool_result_batch(agent, messages: list, num_tool_msgs: int, task_id: str) -> None:
+    """Run batch-level result handling after tool messages have been appended."""
+    if num_tool_msgs <= 0:
+        return
+    turn_tool_msgs = messages[-num_tool_msgs:]
+    enforce_turn_budget(turn_tool_msgs, env=get_active_env(task_id))
+    agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs)
+
+
+def make_cancelled_tool_result_message(name: str, call_id: str) -> dict[str, Any]:
+    return make_tool_result_message(
+        name,
+        f"[Tool execution cancelled — {name} was skipped due to user interrupt]",
+        call_id,
+    )
+
+
+def make_not_started_tool_result_message(name: str, call_id: str) -> dict[str, Any]:
+    return make_tool_result_message(
+        name,
+        f"[Tool execution skipped — {name} was not started. User sent a new message]",
+        call_id,
+    )
+
+
+__all__ = [
+    "FinalizedToolResult",
+    "ToolResultContext",
+    "finalize_tool_result_batch",
+    "finalize_tool_result",
+    "finalize_tool_results",
+    "make_cancelled_tool_result_message",
+    "make_not_started_tool_result_message",
+]

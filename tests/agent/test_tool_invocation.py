@@ -361,6 +361,61 @@ def test_prepared_invocation_exposes_execution_state():
     assert prepared.blocked_result.blocked_by == "guardrail"
 
 
+def test_prepared_invocation_builds_result_context():
+    from agent.tool_invocation import (
+        PreparedToolInvocation,
+        ToolInvocation,
+        ToolInvocationPreparation,
+        ToolInvocationResult,
+    )
+
+    messages = []
+    prepared = PreparedToolInvocation(
+        ToolInvocation("web_search", {"query": "x"}, task_id="task-1", call_id="call-1"),
+        ToolInvocationPreparation(),
+    )
+    result = ToolInvocationResult(
+        content='{"ok": true}',
+        duration_ms=250,
+        adapter_name="registry",
+        is_error=False,
+    )
+
+    ctx = prepared.to_result_context(result, messages)
+
+    assert ctx.name == "web_search"
+    assert ctx.args == {"query": "x"}
+    assert ctx.content == '{"ok": true}'
+    assert ctx.duration == 0.25
+    assert ctx.call_id == "call-1"
+    assert ctx.task_id == "task-1"
+    assert ctx.messages is messages
+    assert ctx.is_error is False
+
+
+def test_prepared_invocation_builds_cancelled_and_missing_results():
+    from agent.tool_invocation import (
+        PreparedToolInvocation,
+        ToolInvocation,
+        ToolInvocationPreparation,
+    )
+
+    prepared = PreparedToolInvocation(
+        ToolInvocation("web_search", {"query": "x"}, task_id="task-1", call_id="call-1"),
+        ToolInvocationPreparation(),
+    )
+
+    cancelled = prepared.cancelled_result()
+    missing = prepared.missing_result()
+
+    assert cancelled.content == "[Tool execution cancelled — web_search was skipped due to user interrupt]"
+    assert cancelled.adapter_name == "cancelled"
+    assert cancelled.is_error is True
+    assert missing.content == "Error executing tool 'web_search': thread did not return a result"
+    assert missing.adapter_name == "error"
+    assert missing.is_error is True
+
+
 def test_invoke_prepared_tool_uses_existing_preparation(monkeypatch):
     from agent.tool_invocation import (
         PreparedToolInvocation,
@@ -548,3 +603,25 @@ def test_invocation_returns_structured_error_when_dispatch_raises(monkeypatch):
     assert result.content == "Error executing tool 'web_search': boom"
     assert result.adapter_name == "error"
     assert result.duration_ms >= 0
+
+
+def test_invocation_marks_detected_tool_failures(monkeypatch):
+    from agent.tool_invocation import ToolInvocation, invoke_tool
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_pre_tool_call_block_message",
+        lambda *args, **kwargs: None,
+    )
+
+    with patch("run_agent.handle_function_call", return_value='{"error": "not found"}'):
+        result = invoke_tool(
+            _agent(valid_tool_names={"web_search"}),
+            ToolInvocation(
+                "web_search",
+                {"query": "x"},
+                task_id="task-1",
+                call_id="call-1",
+            ),
+        )
+
+    assert result.is_error is True

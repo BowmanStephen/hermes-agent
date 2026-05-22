@@ -2519,15 +2519,6 @@ _skill_commands = scan_skill_commands()
 _skill_bundles = get_skill_bundles()
 
 
-def _get_plugin_cmd_handler_names() -> set:
-    """Return plugin command names (without slash prefix) for dispatch matching."""
-    try:
-        from hermes_cli.plugins import get_plugin_commands
-        return set(get_plugin_commands().keys())
-    except Exception:
-        return set()
-
-
 def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> list[str]:
     """Normalize a CLI skills flag into a deduplicated list of skill identifiers."""
     if not skills:
@@ -8069,19 +8060,21 @@ class HermesCLI:
         elif canonical == "busy":
             self._handle_busy_command(cmd_original)
         else:
-            from hermes_cli.commands import CommandSurface, resolve_command_dispatch
+            from hermes_cli.commands import (
+                CommandSurface,
+                resolve_command_dispatch_with_sources,
+            )
 
             # Shared fallback order: quick command, plugin command, skill bundle,
             # skill command, then prefix matching. Built-ins have already been
             # handled above and still take precedence over quick aliases.
             quick_commands = self.config.get("quick_commands", {})
-            dispatch = resolve_command_dispatch(
+            dispatch = resolve_command_dispatch_with_sources(
                 cmd_original,
                 surface=CommandSurface.CLI,
                 quick_commands=quick_commands,
-                plugin_commands=_get_plugin_cmd_handler_names(),
-                skill_bundles=get_skill_bundles(),
-                skill_commands=_skill_commands,
+                skill_bundles_provider=get_skill_bundles,
+                skill_commands_provider=lambda: _skill_commands,
             )
             base_cmd = (
                 f"/{dispatch.invocation.raw_name}"
@@ -8153,7 +8146,7 @@ class HermesCLI:
             # loads multiple skills at once. Rescans cheaply when files change.
             elif dispatch.route == "skill_bundle":
                 user_instruction = cmd_original[len(base_cmd):].strip()
-                bundle_key = f"/{dispatch.handler_key}"
+                bundle_key = dispatch.handler_slash_key
                 bundle_result = build_bundle_invocation_message(
                     bundle_key, user_instruction, task_id=self.session_id
                 )
@@ -8177,7 +8170,7 @@ class HermesCLI:
             # Check for skill slash commands (/gif-search, /axolotl, etc.)
             elif dispatch.route == "skill":
                 user_instruction = cmd_original[len(base_cmd):].strip()
-                skill_key = f"/{dispatch.handler_key}"
+                skill_key = dispatch.handler_slash_key
                 msg = build_skill_invocation_message(
                     skill_key, user_instruction, task_id=self.session_id
                 )
@@ -8192,28 +8185,25 @@ class HermesCLI:
                 # Prefix matching: if input uniquely identifies one command, execute it.
                 # Matches against both built-in COMMANDS and installed skill commands so
                 # that execution-time resolution agrees with tab-completion.
-                from hermes_cli.commands import COMMANDS
+                from hermes_cli.commands import (
+                    cli_prefix_command_names,
+                    resolve_command_prefix_match,
+                )
                 typed_base = cmd_lower.split()[0]
-                all_known = set(COMMANDS) | set(_skill_commands) | set(get_skill_bundles())
-                matches = [c for c in all_known if c.startswith(typed_base)]
-                if len(matches) > 1:
-                    # Prefer an exact match (typed the full command name)
-                    exact = [c for c in matches if c == typed_base]
-                    if len(exact) == 1:
-                        matches = exact
-                    else:
-                        # Prefer the unique shortest match:
-                        # /qui → /quit (5) wins over /quint-pipeline (15)
-                        min_len = min(len(c) for c in matches)
-                        shortest = [c for c in matches if len(c) == min_len]
-                        if len(shortest) == 1:
-                            matches = shortest
-                if len(matches) == 1:
+                prefix_match = resolve_command_prefix_match(
+                    typed_base,
+                    cli_prefix_command_names(
+                        skill_commands=_skill_commands,
+                        skill_bundles=get_skill_bundles(),
+                    ),
+                )
+                matches = list(prefix_match.matches)
+                if prefix_match.resolved:
                     # Expand the prefix to the full command name, preserving arguments.
                     # Guard against redispatching the same token to avoid infinite
                     # recursion when the expanded name still doesn't hit an exact branch
                     # (e.g. /config with extra args that are not yet handled above).
-                    full_name = matches[0]
+                    full_name = prefix_match.resolved
                     if full_name == typed_base:
                         # Already an exact token — no expansion possible; fall through
                         _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
@@ -8222,7 +8212,7 @@ class HermesCLI:
                         remainder = cmd_original.strip()[len(typed_base):]
                         full_cmd = full_name + remainder
                         return self.process_command(full_cmd)
-                elif len(matches) > 1:
+                elif prefix_match.ambiguous:
                     _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
                     _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
                 else:

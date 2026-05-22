@@ -55,6 +55,38 @@ def test_resume_session_rejects_missing_resolved_descendant(tmp_path, monkeypatc
         db.close()
 
 
+def test_resume_session_reopen_failure_does_not_end_current(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import resume_session
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("current", "cli")
+        db.create_session("target", "cli")
+        db.append_message("target", "user", "hello")
+
+        def _fail_reopen(_session_id):
+            raise RuntimeError("reopen failed")
+
+        monkeypatch.setattr(db, "reopen_session", _fail_reopen)
+
+        try:
+            resume_session(
+                db,
+                "target",
+                current_session_id="current",
+                end_current_reason="resumed_other",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "reopen failed"
+        else:
+            raise AssertionError("expected reopen failure")
+
+        assert db.get_session("current")["end_reason"] is None
+    finally:
+        db.close()
+
+
 def test_branch_session_copies_rich_transcript_and_marks_parent_branched(tmp_path):
     from hermes_state import SessionDB
     from session_lifecycle import branch_session
@@ -155,6 +187,117 @@ def test_branch_session_rejects_existing_child_id(tmp_path):
         db.close()
 
 
+def test_branch_session_append_failure_deletes_child(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import branch_session
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("parent", "cli")
+
+        def _fail_append(*_args, **_kwargs):
+            raise RuntimeError("append failed")
+
+        monkeypatch.setattr(db, "append_message", _fail_append)
+
+        try:
+            branch_session(
+                db,
+                parent_session_id="parent",
+                history=[{"role": "user", "content": "hello"}],
+                source="cli",
+                new_session_id="branch",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "append failed"
+        else:
+            raise AssertionError("expected append failure")
+
+        assert db.get_session("parent")["end_reason"] is None
+        assert db.get_session("branch") is None
+    finally:
+        db.close()
+
+
+def test_branch_session_create_ignore_failure_does_not_delete_existing(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import SessionAlreadyExists, branch_session
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("parent", "cli")
+        db.create_session("foreign", "cli")
+
+        create_called = False
+
+        def _get_session(session_id):
+            if session_id == "parent":
+                return {"id": "parent"}
+            if session_id == "foreign" and create_called:
+                return {"id": "foreign", "parent_session_id": "other"}
+            return None
+
+        def _create_session(*_args, **_kwargs):
+            nonlocal create_called
+            create_called = True
+            return "foreign"
+
+        monkeypatch.setattr(db, "get_session", _get_session)
+        monkeypatch.setattr(db, "create_session", _create_session)
+        deleted = []
+        monkeypatch.setattr(db, "delete_session", lambda session_id: deleted.append(session_id))
+
+        try:
+            branch_session(
+                db,
+                parent_session_id="parent",
+                history=[{"role": "user", "content": "hello"}],
+                source="cli",
+                new_session_id="foreign",
+            )
+        except SessionAlreadyExists as exc:
+            assert str(exc) == "foreign"
+        else:
+            raise AssertionError("expected child ownership verification failure")
+
+        assert deleted == []
+    finally:
+        db.close()
+
+
+def test_branch_session_tolerates_title_failure(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import branch_session
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("parent", "cli")
+        monkeypatch.setattr(
+            db,
+            "set_session_title",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("title failed")),
+        )
+
+        result = branch_session(
+            db,
+            parent_session_id="parent",
+            history=[{"role": "user", "content": "hello"}],
+            branch_title="Branch Title",
+            source="cli",
+            new_session_id="branch",
+        )
+
+        assert result.session_id == "branch"
+        assert result.title == "Branch Title"
+        assert db.get_session("parent")["end_reason"] == "branched"
+        assert db.get_session("branch")["parent_session_id"] == "parent"
+        assert db.get_messages_as_conversation("branch") == [
+            {"role": "user", "content": "hello"},
+        ]
+    finally:
+        db.close()
+
+
 def test_split_session_for_compression_preserves_lineage_title_and_prompt(tmp_path):
     from hermes_state import SessionDB
     from session_lifecycle import split_session_for_compression
@@ -212,6 +355,125 @@ def test_split_session_for_compression_rejects_existing_child_id(tmp_path):
 
         assert db.get_session("old")["end_reason"] is None
         assert db.get_session("new")["parent_session_id"] is None
+    finally:
+        db.close()
+
+
+def test_split_session_for_compression_create_failure_does_not_end_old(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import split_session_for_compression
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("old", "cli", model="test-model")
+
+        def _fail_create(*_args, **_kwargs):
+            raise RuntimeError("create failed")
+
+        monkeypatch.setattr(db, "create_session", _fail_create)
+
+        try:
+            split_session_for_compression(
+                db,
+                old_session_id="old",
+                source="cli",
+                model="test-model",
+                model_config={},
+                system_prompt="new prompt",
+                new_session_id="new",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "create failed"
+        else:
+            raise AssertionError("expected create failure")
+
+        assert db.get_session("old")["end_reason"] is None
+        assert db.get_session("new") is None
+    finally:
+        db.close()
+
+
+def test_split_session_for_compression_prompt_failure_deletes_child(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import split_session_for_compression
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("old", "cli", model="test-model")
+
+        def _fail_prompt(*_args, **_kwargs):
+            raise RuntimeError("prompt failed")
+
+        monkeypatch.setattr(db, "update_system_prompt", _fail_prompt)
+
+        try:
+            split_session_for_compression(
+                db,
+                old_session_id="old",
+                source="cli",
+                model="test-model",
+                model_config={},
+                system_prompt="new prompt",
+                new_session_id="new",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "prompt failed"
+        else:
+            raise AssertionError("expected prompt failure")
+
+        assert db.get_session("old")["end_reason"] is None
+        assert db.get_session("new") is None
+    finally:
+        db.close()
+
+
+def test_split_session_for_compression_create_ignore_failure_does_not_delete_existing(
+    tmp_path,
+    monkeypatch,
+):
+    from hermes_state import SessionDB
+    from session_lifecycle import SessionAlreadyExists, split_session_for_compression
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("old", "cli", model="test-model")
+        db.create_session("foreign", "cli", model="test-model")
+
+        create_called = False
+
+        def _get_session(session_id):
+            if session_id == "old":
+                return {"id": "old"}
+            if session_id == "foreign" and create_called:
+                return {"id": "foreign", "parent_session_id": "other"}
+            return None
+
+        def _create_session(*_args, **_kwargs):
+            nonlocal create_called
+            create_called = True
+            return "foreign"
+
+        monkeypatch.setattr(db, "get_session", _get_session)
+        monkeypatch.setattr(db, "create_session", _create_session)
+        deleted = []
+        monkeypatch.setattr(db, "delete_session", lambda session_id: deleted.append(session_id))
+
+        try:
+            split_session_for_compression(
+                db,
+                old_session_id="old",
+                source="cli",
+                model="test-model",
+                model_config={},
+                system_prompt="new prompt",
+                new_session_id="foreign",
+            )
+        except SessionAlreadyExists as exc:
+            assert str(exc) == "foreign"
+        else:
+            raise AssertionError("expected child ownership verification failure")
+
+        assert deleted == []
     finally:
         db.close()
 
@@ -274,6 +536,37 @@ def test_activate_session_reopens_target_and_ends_previous(tmp_path):
         target = db.get_session("target")
         assert target["ended_at"] is None
         assert target["end_reason"] is None
+    finally:
+        db.close()
+
+
+def test_activate_session_reopen_failure_does_not_end_previous(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from session_lifecycle import activate_session
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("current", "gateway")
+        db.create_session("target", "telegram")
+
+        def _fail_reopen(_session_id):
+            raise RuntimeError("reopen failed")
+
+        monkeypatch.setattr(db, "reopen_session", _fail_reopen)
+
+        try:
+            activate_session(
+                db,
+                "target",
+                current_session_id="current",
+                end_current_reason="session_switch",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "reopen failed"
+        else:
+            raise AssertionError("expected reopen failure")
+
+        assert db.get_session("current")["end_reason"] is None
     finally:
         db.close()
 

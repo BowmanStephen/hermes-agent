@@ -95,6 +95,31 @@ def _get_session_title(db: Any, session_id: str) -> Optional[str]:
         return None
 
 
+def _delete_session_best_effort(db: Any, session_id: str) -> None:
+    deleter = getattr(db, "delete_session", None)
+    if deleter is None:
+        return
+    try:
+        deleter(session_id)
+    except Exception:
+        pass
+
+
+def _parent_session_id(row: Dict[str, Any]) -> Optional[str]:
+    try:
+        return row.get("parent_session_id")
+    except AttributeError:
+        return None
+
+
+def _verify_created_child(db: Any, session_id: str, parent_session_id: str) -> None:
+    row = db.get_session(session_id)
+    if not row:
+        raise SessionLifecycleError(f"session was not created: {session_id}")
+    if _parent_session_id(row) != parent_session_id:
+        raise SessionAlreadyExists(session_id)
+
+
 def resume_session(
     db: Any,
     requested_session_id: str,
@@ -122,11 +147,10 @@ def resume_session(
             raise SessionNotFound(session_id)
         session = resolved_session
 
-    if current_session_id and current_session_id != session_id and end_current_reason:
-        db.end_session(current_session_id, end_current_reason)
-
     messages = _without_session_meta(db.get_messages_as_conversation(session_id) or [])
     db.reopen_session(session_id)
+    if current_session_id and current_session_id != session_id and end_current_reason:
+        db.end_session(current_session_id, end_current_reason)
 
     title = session.get("title") or _get_session_title(db, requested_session_id)
     return ResumeSessionResult(
@@ -150,9 +174,9 @@ def activate_session(
     """Make an existing session active by reopening it and ending the previous one."""
     if not db.get_session(session_id):
         raise SessionNotFound(session_id)
+    db.reopen_session(session_id)
     if current_session_id and current_session_id != session_id and end_current_reason:
         db.end_session(current_session_id, end_current_reason)
-    db.reopen_session(session_id)
     return ActivateSessionResult(
         session_id=session_id,
         previous_session_id=current_session_id if current_session_id != session_id else None,
@@ -184,21 +208,32 @@ def branch_session(
         current_title = _get_session_title(db, parent_session_id)
         branch_title = db.get_next_title_in_lineage(current_title or "branch")
 
-    db.create_session(
-        session_id=session_id,
-        source=source,
-        model=model,
-        model_config=model_config,
-        system_prompt=system_prompt,
-        user_id=user_id,
-        parent_session_id=parent_session_id,
-    )
+    created_child = False
+    try:
+        db.create_session(
+            session_id=session_id,
+            source=source,
+            model=model,
+            model_config=model_config,
+            system_prompt=system_prompt,
+            user_id=user_id,
+            parent_session_id=parent_session_id,
+        )
+        _verify_created_child(db, session_id, parent_session_id)
+        created_child = True
 
-    for msg in messages:
-        _append_transcript_message(db, session_id, msg)
+        for msg in messages:
+            _append_transcript_message(db, session_id, msg)
 
-    db.set_session_title(session_id, branch_title)
-    db.end_session(parent_session_id, "branched")
+        try:
+            db.set_session_title(session_id, branch_title)
+        except Exception:
+            pass
+        db.end_session(parent_session_id, "branched")
+    except Exception:
+        if created_child:
+            _delete_session_best_effort(db, session_id)
+        raise
     return BranchSessionResult(
         session_id=session_id,
         parent_session_id=parent_session_id,
@@ -226,26 +261,34 @@ def split_session_for_compression(
 
     if not db.get_session(old_session_id):
         db.ensure_session(old_session_id, source=source, model=model)
-    db.end_session(old_session_id, "compression")
-    db.create_session(
-        session_id=session_id,
-        source=source,
-        model=model,
-        model_config=model_config,
-        parent_session_id=old_session_id,
-    )
+    created_child = False
+    try:
+        db.create_session(
+            session_id=session_id,
+            source=source,
+            model=model,
+            model_config=model_config,
+            parent_session_id=old_session_id,
+        )
+        _verify_created_child(db, session_id, old_session_id)
+        created_child = True
 
-    new_title = None
-    if old_title:
-        try:
-            new_title = db.get_next_title_in_lineage(old_title)
-            db.set_session_title(session_id, new_title)
-        except Exception:
-            new_title = None
+        new_title = None
+        if old_title:
+            try:
+                new_title = db.get_next_title_in_lineage(old_title)
+                db.set_session_title(session_id, new_title)
+            except Exception:
+                new_title = None
 
-    if system_prompt is not None:
-        db.update_system_prompt(session_id, system_prompt)
+        if system_prompt is not None:
+            db.update_system_prompt(session_id, system_prompt)
 
+        db.end_session(old_session_id, "compression")
+    except Exception:
+        if created_child:
+            _delete_session_best_effort(db, session_id)
+        raise
     return CompressionSplitResult(
         session_id=session_id,
         parent_session_id=old_session_id,

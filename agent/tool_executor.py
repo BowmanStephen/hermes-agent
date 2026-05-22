@@ -25,17 +25,20 @@ from agent.display import (
     build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
     get_tool_emoji as _get_tool_emoji,
-    _detect_tool_failure,
 )
 from agent.tool_invocation import (
-    ToolInvocationResult,
     invoke_prepared_tool as _invoke_prepared_tool_core,
     prepare_tool_call,
 )
-from agent.tool_result_flow import finalize_tool_result
+from agent.tool_result_flow import (
+    finalize_tool_result,
+    finalize_tool_result_batch,
+    finalize_tool_results,
+    make_cancelled_tool_result_message,
+    make_not_started_tool_result_message,
+)
 from agent.tool_dispatch_helpers import (
     _multimodal_text_summary,
-    make_tool_result_message,
 )
 from tools.terminal_tool import (
     _get_approval_callback,
@@ -43,8 +46,6 @@ from tools.terminal_tool import (
     set_approval_callback as _set_approval_callback,
     set_sudo_password_callback as _set_sudo_password_callback,
 )
-from tools.terminal_tool import get_active_env
-from tools.tool_result_storage import enforce_turn_budget
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +73,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
         for tc in tool_calls:
-            messages.append(make_tool_result_message(
-                tc.function.name,
-                f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
-                tc.id,
-            ))
+            messages.append(make_cancelled_tool_result_message(tc.function.name, tc.id))
         return
 
     # ── Parse args + pre-execution bookkeeping ───────────────────────
@@ -192,9 +189,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             invocation_result = _invoke_prepared_tool_core(agent, prepared)
             result = invocation_result.content
             duration = invocation_result.duration_seconds
-            is_error = invocation_result.is_error
-            if is_error is None:
-                is_error, _ = _detect_tool_failure(prepared.name, result)
+            is_error = bool(invocation_result.is_error)
             result_summary = _multimodal_text_summary(result)
             if is_error:
                 logger.info("tool %s failed (%.2fs): %s", prepared.name, duration, result_summary[:200])
@@ -292,33 +287,41 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     finally:
         if spinner:
             # Build a summary message for the spinner stop
-            completed = sum(1 for r in results if r is not None)
-            total_dur = sum(r[1].duration_seconds for r in results if r is not None)
-            spinner.stop(f"⚡ {completed}/{num_tools} tools completed in {total_dur:.1f}s total")
+            runnable_results = [
+                result
+                for prepared, result in zip(prepared_calls, results)
+                if prepared.allows_execution and result is not None
+            ]
+            completed = len(runnable_results)
+            total_dur = sum(result[1].duration_seconds for result in runnable_results)
+            spinner.stop(
+                f"⚡ {completed}/{len(runnable_calls)} tools completed in {total_dur:.1f}s total"
+            )
 
-    # ── Post-execution: display per-tool results ─────────────────────
+    # ── Post-execution: finalize and display per-tool results ─────────
+    display_rows = []
+    result_contexts = []
     for i, prepared in enumerate(prepared_calls):
         r = results[i]
         if r is None:
             # Tool was cancelled (interrupt) or thread didn't return
             if agent._interrupt_requested:
-                function_result = f"[Tool execution cancelled — {prepared.name} was skipped due to user interrupt]"
-                invocation_result = ToolInvocationResult.cancelled(function_result)
+                invocation_result = prepared.cancelled_result()
             else:
-                function_result = f"Error executing tool '{prepared.name}': thread did not return a result"
-                invocation_result = ToolInvocationResult.error(function_result)
+                invocation_result = prepared.missing_result()
+            function_result = invocation_result.content
             tool_duration = 0.0
         else:
             prepared, invocation_result = r
             function_result = invocation_result.content
             tool_duration = invocation_result.duration_seconds
-        finalized = finalize_tool_result(
-            agent,
-            invocation_result.to_result_context(
-                prepared.invocation,
-                messages,
-            ),
+        result_contexts.append(
+            prepared.to_result_context(invocation_result, messages)
         )
+        display_rows.append((i, prepared, function_result, tool_duration))
+
+    finalized_results = finalize_tool_results(agent, result_contexts)
+    for (i, prepared, _function_result, tool_duration), finalized in zip(display_rows, finalized_results):
         function_result = finalized.content
 
         # Print cute message per tool
@@ -334,19 +337,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 response_preview = _preview_str[:agent.log_prefix_chars] + "..." if len(_preview_str) > agent.log_prefix_chars else _preview_str
                 print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
-    # ── Per-turn aggregate budget enforcement ─────────────────────────
-    num_tools = len(prepared_calls)
-    if num_tools > 0:
-        turn_tool_msgs = messages[-num_tools:]
-        enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))
-
-    # ── /steer injection ──────────────────────────────────────────────
-    # Append any pending user steer text to the last tool result so the
-    # agent sees it on its next iteration. Runs AFTER budget enforcement
-    # so the steer marker is never truncated. See steer() for details.
-    if num_tools > 0:
-        agent._apply_pending_steer_to_tool_results(messages, num_tools)
-
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -360,20 +350,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             if remaining_calls:
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
             for skipped_tc in remaining_calls:
-                skipped_name = skipped_tc.function.name
-                skip_msg = {
-                    "role": "tool",
-                    "name": skipped_name,
-                    "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
-                    "tool_call_id": skipped_tc.id,
-                }
-                messages.append(skip_msg)
+                messages.append(make_cancelled_tool_result_message(skipped_tc.function.name, skipped_tc.id))
             break
 
-        function_name = tool_call.function.name
-
         prepared = prepare_tool_call(agent, tool_call, effective_task_id or "", messages)
-        invocation = prepared.invocation
+        function_name = prepared.name
         function_args = prepared.args
         _execution_blocked = not prepared.allows_execution
 
@@ -409,7 +390,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         if not _execution_blocked and agent.tool_start_callback:
             try:
-                agent.tool_start_callback(tool_call.id, function_name, function_args)
+                agent.tool_start_callback(prepared.call_id, function_name, function_args)
             except Exception as cb_err:
                 logging.debug(f"Tool start callback error: {cb_err}")
 
@@ -483,10 +464,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         finalized = finalize_tool_result(
             agent,
-            invocation_result.to_result_context(
-                invocation,
-                messages,
-            ),
+            prepared.to_result_context(invocation_result, messages),
         )
         function_result = finalized.content
 
@@ -503,12 +481,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             remaining = len(assistant_message.tool_calls) - i
             agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
             for skipped_tc in assistant_message.tool_calls[i:]:
-                skipped_name = skipped_tc.function.name
-                messages.append(make_tool_result_message(
-                    skipped_name,
-                    f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
-                    skipped_tc.id,
-                ))
+                messages.append(make_not_started_tool_result_message(skipped_tc.function.name, skipped_tc.id))
             break
 
         if agent.tool_delay > 0 and i < len(assistant_message.tool_calls):
@@ -516,14 +489,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
     # ── Per-turn aggregate budget enforcement ─────────────────────────
     num_tools_seq = len(assistant_message.tool_calls)
-    if num_tools_seq > 0:
-        enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))
-
-    # ── /steer injection ──────────────────────────────────────────────
-    # See _execute_tool_calls_parallel for the rationale. Same hook,
-    # applied to sequential execution as well.
-    if num_tools_seq > 0:
-        agent._apply_pending_steer_to_tool_results(messages, num_tools_seq)
+    finalize_tool_result_batch(agent, messages, num_tools_seq, effective_task_id)
 
 
 

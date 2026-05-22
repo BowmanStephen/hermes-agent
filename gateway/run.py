@@ -7067,7 +7067,9 @@ class GatewayRunner:
             CommandSurface,
             is_gateway_known_command,
             resolve_command_dispatch,
+            resolve_command_dispatch_with_sources,
             resolve_command_invocation,
+            resolve_plugin_command_dispatch,
             select_command_handler,
         )
 
@@ -7130,17 +7132,11 @@ class GatewayRunner:
         # run every command. When set → non-admins can run only commands in
         # ``user_allowed_commands`` (plus the always-allowed floor: /help,
         # /whoami). Plain chat is unaffected — only slash commands gate.
-        try:
-            from hermes_cli.plugins import get_plugin_commands
-            plugin_commands_for_hooks = set(get_plugin_commands() or {})
-        except Exception:
-            plugin_commands_for_hooks = set()
-        if command and plugin_commands_for_hooks:
-            _hook_dispatch = resolve_command_dispatch(
+        if command:
+            _hook_dispatch = resolve_plugin_command_dispatch(
                 name=command,
                 args=event.get_command_args().strip(),
                 surface=CommandSurface.GATEWAY,
-                plugin_commands=plugin_commands_for_hooks,
             )
             if _hook_dispatch.route == "plugin":
                 canonical = _hook_dispatch.handler_key
@@ -7215,12 +7211,11 @@ class GatewayRunner:
                         if _cmd_invocation
                         else command
                     )
-                    if command and plugin_commands_for_hooks:
-                        _hook_dispatch = resolve_command_dispatch(
+                    if command:
+                        _hook_dispatch = resolve_plugin_command_dispatch(
                             name=command,
                             args=new_args,
                             surface=CommandSurface.GATEWAY,
-                            plugin_commands=plugin_commands_for_hooks,
                         )
                         if _hook_dispatch.route == "plugin":
                             canonical = _hook_dispatch.handler_key
@@ -7329,27 +7324,16 @@ class GatewayRunner:
             if not isinstance(quick_commands, dict):
                 quick_commands = {}
             try:
-                plugin_commands = plugin_commands_for_hooks
-            except Exception:
-                plugin_commands = set()
-            try:
-                from agent.skill_bundles import get_skill_bundles
-                skill_bundles = get_skill_bundles()
-            except Exception:
-                skill_bundles = {}
-            try:
                 from agent.skill_commands import get_skill_commands
                 skill_cmds = get_skill_commands()
             except Exception:
                 skill_cmds = {}
-            command_dispatch = resolve_command_dispatch(
+            command_dispatch = resolve_command_dispatch_with_sources(
                 name=command,
                 args=event.get_command_args().strip(),
                 surface=CommandSurface.GATEWAY,
                 quick_commands=quick_commands,
-                plugin_commands=plugin_commands,
-                skill_bundles=skill_bundles,
-                skill_commands=skill_cmds,
+                skill_commands_provider=lambda: skill_cmds,
             )
         else:
             command_dispatch = None
@@ -7410,13 +7394,11 @@ class GatewayRunner:
                         if target_command
                         else target_command
                     )
-                    command_dispatch = resolve_command_dispatch(
+                    command_dispatch = resolve_command_dispatch_with_sources(
                         name=command,
                         args=user_args,
                         surface=CommandSurface.GATEWAY,
-                        plugin_commands=plugin_commands,
-                        skill_bundles=skill_bundles,
-                        skill_commands=skill_cmds,
+                        skill_commands_provider=lambda: skill_cmds,
                     )
                 else:
                     return f"Quick command '/{command}' has no target defined."
@@ -7458,7 +7440,7 @@ class GatewayRunner:
                 from agent.skill_bundles import (
                     build_bundle_invocation_message,
                 )
-                bundle_key = f"/{command_dispatch.handler_key}"
+                bundle_key = command_dispatch.handler_slash_key
                 if bundle_key is not None:
                     user_instruction = event.get_command_args().strip()
                     bundle_result = build_bundle_invocation_message(
@@ -7490,7 +7472,7 @@ class GatewayRunner:
                     resolve_skill_command_key,
                 )
                 cmd_key = (
-                    f"/{command_dispatch.handler_key}"
+                    command_dispatch.handler_slash_key
                     if command_dispatch.route == "skill"
                     else resolve_skill_command_key(command)
                 )

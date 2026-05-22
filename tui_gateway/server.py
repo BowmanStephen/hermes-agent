@@ -4462,6 +4462,7 @@ def _(rid, params: dict) -> dict:
             COMMAND_REGISTRY,
             SUBCOMMANDS,
             _build_description,
+            slash_command_key,
         )
 
         all_pairs: list[list[str]] = []
@@ -4506,7 +4507,7 @@ def _(rid, params: dict) -> dict:
                 for qname, qc in sorted(qcmds.items()):
                     if not isinstance(qc, dict):
                         continue
-                    key = f"/{qname}"
+                    key = slash_command_key(str(qname))
                     canon[key.lower()] = key
                     qtype = qc.get("type", "")
                     if qtype == "exec":
@@ -4640,32 +4641,21 @@ def _(rid, params: dict) -> dict:
 
     qcmds = _load_cfg().get("quick_commands", {})
     try:
-        from hermes_cli.commands import CommandSurface, resolve_command_dispatch
+        from hermes_cli.commands import (
+            CommandSurface,
+            resolve_command_dispatch_with_sources,
+        )
 
-        try:
-            from hermes_cli.plugins import get_plugin_commands
-            plugin_commands = set(get_plugin_commands() or {})
-        except Exception:
-            plugin_commands = set()
-        try:
-            from agent.skill_bundles import get_skill_bundles
-            skill_bundles = get_skill_bundles()
-        except Exception:
-            skill_bundles = {}
-        try:
+        def _scan_tui_skill_commands():
             from agent.skill_commands import scan_skill_commands
-            skill_commands = scan_skill_commands()
-        except Exception:
-            skill_commands = {}
+            return scan_skill_commands()
 
-        dispatch = resolve_command_dispatch(
+        dispatch = resolve_command_dispatch_with_sources(
             name=raw_name,
             args=arg,
             surface=CommandSurface.TUI,
             quick_commands=qcmds,
-            plugin_commands=plugin_commands,
-            skill_bundles=skill_bundles,
-            skill_commands=skill_commands,
+            skill_commands_provider=_scan_tui_skill_commands,
         )
     except Exception:
         dispatch = None
@@ -4737,7 +4727,7 @@ def _(rid, params: dict) -> dict:
                 get_skill_bundles,
             )
 
-            bundle_key = f"/{dispatch.handler_key}"
+            bundle_key = dispatch.handler_slash_key
             bundles = get_skill_bundles()
             if bundle_key is not None:
                 bundle_result = build_bundle_invocation_message(
@@ -4766,7 +4756,7 @@ def _(rid, params: dict) -> dict:
 
         cmds = scan_skill_commands()
         key = (
-            f"/{dispatch.handler_key}"
+            dispatch.handler_slash_key
             if dispatch is not None and dispatch.route == "skill"
             else f"/{name}"
         )
@@ -5694,38 +5684,23 @@ def _(rid, params: dict) -> dict:
 
     command_dispatch = None
     try:
-        from hermes_cli.commands import CommandSurface, resolve_command_dispatch
+        from hermes_cli.commands import (
+            CommandSurface,
+            resolve_command_dispatch_with_sources,
+        )
     except Exception:
-        resolve_command_dispatch = None
+        resolve_command_dispatch_with_sources = None
         CommandSurface = None
-    if resolve_command_dispatch is not None and CommandSurface is not None:
+    if resolve_command_dispatch_with_sources is not None and CommandSurface is not None:
         qcmds = _load_cfg().get("quick_commands", {})
         if not isinstance(qcmds, dict):
             qcmds = {}
-        try:
-            from hermes_cli.plugins import get_plugin_commands
-            plugin_commands = set(get_plugin_commands() or {})
-        except Exception:
-            plugin_commands = set()
-        try:
-            from agent.skill_bundles import get_skill_bundles
-            skill_bundles = get_skill_bundles()
-        except Exception:
-            skill_bundles = {}
-        try:
-            from agent.skill_commands import get_skill_commands
-            skill_commands = get_skill_commands()
-        except Exception:
-            skill_commands = {}
 
-        command_dispatch = resolve_command_dispatch(
+        command_dispatch = resolve_command_dispatch_with_sources(
             name=_cmd_base,
             args=_cmd_arg,
             surface=CommandSurface.TUI,
             quick_commands=qcmds,
-            plugin_commands=plugin_commands,
-            skill_bundles=skill_bundles,
-            skill_commands=skill_commands,
         )
     if command_dispatch is not None:
         if command_dispatch.route in {
@@ -5742,13 +5717,13 @@ def _(rid, params: dict) -> dict:
             return _err(
                 rid,
                 4018,
-                f"skill bundle: use command.dispatch for /{command_dispatch.handler_key}",
+                f"skill bundle: use command.dispatch for {command_dispatch.handler_slash_key}",
             )
         if command_dispatch.route == "skill":
             return _err(
                 rid,
                 4018,
-                f"skill command: use command.dispatch for /{command_dispatch.handler_key}",
+                f"skill command: use command.dispatch for {command_dispatch.handler_slash_key}",
             )
         if command_dispatch.route == "unavailable":
             return _err(

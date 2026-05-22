@@ -344,6 +344,30 @@ def test_config_roundtrip(server, tmp_path):
     assert server._load_cfg()["model"] == "test/model"
 
 
+def test_commands_catalog_normalizes_slash_prefixed_quick_command_keys(server):
+    """commands.catalog must not render /quick config keys as //quick."""
+    with patch.object(
+        server,
+        "_load_cfg",
+        return_value={
+            "quick_commands": {
+                "/shipit": {
+                    "type": "alias",
+                    "target": "/status",
+                    "description": "Ship it",
+                }
+            }
+        },
+    ), patch("agent.skill_commands.scan_skill_commands", return_value={}):
+        resp = server.handle_request({"id": "catalog", "method": "commands.catalog"})
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert ["/shipit", "Ship it"] in result["pairs"]
+    assert ["//shipit", "Ship it"] not in result["pairs"]
+    assert result["canon"]["/shipit"] == "/shipit"
+
+
 # ── _cli_exec_blocked ────────────────────────────────────────────────
 
 

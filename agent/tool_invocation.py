@@ -147,6 +147,19 @@ class PreparedToolInvocation:
     def blocked_result(self) -> Optional[ToolInvocationResult]:
         return self.preparation.to_blocked_result()
 
+    def to_result_context(self, result: ToolInvocationResult, messages: list):
+        return result.to_result_context(self.invocation, messages)
+
+    def cancelled_result(self) -> ToolInvocationResult:
+        return ToolInvocationResult.cancelled(
+            f"[Tool execution cancelled — {self.name} was skipped due to user interrupt]"
+        )
+
+    def missing_result(self) -> ToolInvocationResult:
+        return ToolInvocationResult.error(
+            f"Error executing tool '{self.name}': thread did not return a result"
+        )
+
 
 def _ra():
     """Lazy reference to ``run_agent`` so existing tests can patch it."""
@@ -262,6 +275,13 @@ def _invoke_post_and_transform_hooks(agent, invocation: ToolInvocation, result: 
     except Exception as hook_err:
         logger.debug("transform_tool_result hook error: %s", hook_err)
     return result
+
+
+def _detect_invocation_error(invocation: ToolInvocation, result: Any) -> bool:
+    from agent.display import _detect_tool_failure
+
+    is_error, _ = _detect_tool_failure(invocation.name, result)
+    return is_error
 
 
 def _invoke_agent_adapter(agent, invocation: ToolInvocation) -> tuple[Any, str, bool]:
@@ -488,6 +508,7 @@ def invoke_tool(
         duration_ms=duration_ms,
         adapter_name=adapter_name,
         blocked_by=None,
+        is_error=_detect_invocation_error(invocation, result),
     )
 
 

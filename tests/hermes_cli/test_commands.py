@@ -19,15 +19,20 @@ from hermes_cli.commands import (
     _clamp_command_names,
     _clamp_telegram_names,
     _sanitize_telegram_name,
+    cli_prefix_command_names,
     discord_skill_commands,
     gateway_help_lines,
+    resolve_command_prefix_match,
     resolve_command_dispatch,
+    resolve_command_dispatch_with_sources,
     resolve_command_invocation,
+    resolve_plugin_command_dispatch,
     resolve_command,
     select_command_handler,
     slack_app_manifest,
     slack_native_slashes,
     slack_subcommand_map,
+    slash_command_key,
     telegram_bot_commands,
     telegram_menu_commands,
 )
@@ -127,6 +132,12 @@ class TestResolveCommand:
     def test_unknown_returns_none(self):
         assert resolve_command("nonexistent") is None
         assert resolve_command("") is None
+
+
+class TestSlashCommandKey:
+    def test_adds_one_slash_prefix(self):
+        assert slash_command_key("shipit") == "/shipit"
+        assert slash_command_key("/shipit") == "/shipit"
 
 
 class TestCommandDispatch:
@@ -246,8 +257,78 @@ class TestCommandDispatch:
         assert plugin_dispatch.handler_key == "my-plugin-cmd"
         assert bundle_dispatch.route == "skill_bundle"
         assert bundle_dispatch.handler_key == "backend-dev"
+        assert bundle_dispatch.handler_slash_key == "/backend-dev"
         assert skill_dispatch.route == "skill"
         assert skill_dispatch.handler_key == "claude-code"
+        assert skill_dispatch.handler_slash_key == "/claude-code"
+
+    def test_dispatch_with_sources_uses_providers_behind_seam(self):
+        dispatch = resolve_command_dispatch_with_sources(
+            "/metricas today",
+            surface=CommandSurface.CLI,
+            plugin_commands_provider=lambda: {"metricas"},
+            skill_bundles_provider=lambda: {},
+            skill_commands_provider=lambda: {},
+        )
+
+        assert dispatch.route == "plugin"
+        assert dispatch.handler_key == "metricas"
+
+    def test_dispatch_with_sources_tolerates_provider_failures(self):
+        def _boom():
+            raise RuntimeError("source down")
+
+        dispatch = resolve_command_dispatch_with_sources(
+            "/definitely-not-registered",
+            surface=CommandSurface.CLI,
+            plugin_commands_provider=_boom,
+            skill_bundles_provider=_boom,
+            skill_commands_provider=_boom,
+        )
+
+        assert dispatch.route == "unknown"
+
+    def test_plugin_command_dispatch_ignores_skill_sources(self, monkeypatch):
+        from agent import skill_commands as _skill_commands_mod
+        from hermes_cli import plugins as _plugins_mod
+
+        monkeypatch.setattr(_plugins_mod, "get_plugin_commands", lambda: {})
+        monkeypatch.setattr(
+            _skill_commands_mod,
+            "get_skill_commands",
+            lambda: {"/skill-only": {"name": "Skill Only"}},
+        )
+
+        dispatch = resolve_plugin_command_dispatch("/skill-only")
+
+        assert dispatch.route == "unknown"
+
+
+class TestCommandPrefixMatch:
+    def test_unique_short_prefix_resolves(self):
+        match = resolve_command_prefix_match("/qui", {"/quit", "/quint-pipeline"})
+
+        assert match.resolved == "/quit"
+        assert not match.ambiguous
+
+    def test_tied_shortest_prefix_is_ambiguous(self):
+        match = resolve_command_prefix_match("/re", {"/reset", "/retry"})
+
+        assert match.resolved is None
+        assert match.ambiguous
+        assert match.matches == ("/reset", "/retry")
+
+    def test_cli_prefix_names_include_plugins(self):
+        names = cli_prefix_command_names(
+            skill_commands={"/skill-one": {}},
+            skill_bundles={"/bundle-one": {}},
+            plugin_commands_provider=lambda: {"plugin-one"},
+        )
+
+        assert "/help" in names
+        assert "/skill-one" in names
+        assert "/bundle-one" in names
+        assert "/plugin-one" in names
 
 
 # ---------------------------------------------------------------------------

@@ -650,10 +650,11 @@ def test_session_resume_follows_compression_descendant(monkeypatch):
 
 def test_session_branch_preserves_metadata_and_marks_parent_branched(monkeypatch):
     captured = {"messages": []}
+    sessions = {"parent": {"id": "parent"}}
 
     class FakeDB:
         def get_session(self, target):
-            return {"id": target} if target == "parent" else None
+            return sessions.get(target)
 
         def get_session_title(self, target):
             return "Current Work" if target == "parent" else None
@@ -663,6 +664,10 @@ def test_session_branch_preserves_metadata_and_marks_parent_branched(monkeypatch
 
         def create_session(self, *args, **kwargs):
             captured["create"] = (args, kwargs)
+            sessions[kwargs["session_id"]] = {
+                "id": kwargs["session_id"],
+                "parent_session_id": kwargs.get("parent_session_id"),
+            }
 
         def append_message(self, **kwargs):
             captured["messages"].append(kwargs)

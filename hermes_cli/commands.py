@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -98,6 +98,26 @@ class SlashCommandDispatch:
     route: str
     handler_key: str
     target: str | None = None
+
+    @property
+    def handler_slash_key(self) -> str:
+        """Return ``handler_key`` with the slash prefix used by skill maps."""
+        if self.handler_key.startswith("/"):
+            return self.handler_key
+        return f"/{self.handler_key}"
+
+
+@dataclass(frozen=True)
+class CommandPrefixMatch:
+    """Result of trying to expand a partially typed slash command."""
+
+    typed_base: str
+    matches: tuple[str, ...]
+    resolved: str | None = None
+
+    @property
+    def ambiguous(self) -> bool:
+        return self.resolved is None and bool(self.matches)
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +624,83 @@ def resolve_command_dispatch_with_sources(
             skill_commands_provider,
             _default_skill_commands,
         ),
+    )
+
+
+def resolve_plugin_command_dispatch(
+    text: str | None = None,
+    *,
+    name: str | None = None,
+    args: str = "",
+    surface: CommandSurface | str = CommandSurface.GATEWAY,
+) -> SlashCommandDispatch:
+    """Resolve only built-in/plugin command identity for hooks and access gates."""
+    return resolve_command_dispatch_with_sources(
+        text,
+        name=name,
+        args=args,
+        surface=surface,
+        quick_commands={},
+        skill_bundles_provider=lambda: {},
+        skill_commands_provider=lambda: {},
+    )
+
+
+def slash_command_key(name: str) -> str:
+    """Return the slash-prefixed form used by command maps and catalogs."""
+    text = str(name)
+    return text if text.startswith("/") else f"/{text}"
+
+
+# Backward-compatible internal name for older call sites/tests.
+_slashify_command_name = slash_command_key
+
+
+def cli_prefix_command_names(
+    *,
+    skill_commands: Mapping[str, Any] | None = None,
+    skill_bundles: Mapping[str, Any] | None = None,
+    plugin_commands_provider: Callable[[], Any] | None = None,
+) -> set[str]:
+    """Return slash-prefixed names considered by CLI prefix expansion."""
+    names = set(COMMANDS)
+    if isinstance(skill_commands, Mapping):
+        names.update(slash_command_key(str(name)) for name in skill_commands)
+    if isinstance(skill_bundles, Mapping):
+        names.update(slash_command_key(str(name)) for name in skill_bundles)
+    plugin_commands = _provider_value(
+        plugin_commands_provider,
+        _default_plugin_commands,
+    )
+    try:
+        names.update(slash_command_key(str(name)) for name in plugin_commands)
+    except TypeError:
+        pass
+    return names
+
+
+def resolve_command_prefix_match(
+    typed_base: str,
+    command_names: Iterable[str],
+) -> CommandPrefixMatch:
+    """Resolve unique slash-command prefixes using the CLI's legacy tie-breaks."""
+    typed = (typed_base or "").lower()
+    names = {slash_command_key(str(name).lower()) for name in command_names}
+    matches = [name for name in names if name.startswith(typed)]
+    if len(matches) > 1:
+        exact = [name for name in matches if name == typed]
+        if len(exact) == 1:
+            matches = exact
+        else:
+            min_len = min(len(name) for name in matches)
+            shortest = [name for name in matches if len(name) == min_len]
+            if len(shortest) == 1:
+                matches = shortest
+    matches = tuple(sorted(matches))
+    return CommandPrefixMatch(
+        typed_base=typed,
+        matches=matches,
+        resolved=matches[0] if len(matches) == 1 else None,
     )
 
 

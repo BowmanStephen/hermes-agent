@@ -2283,7 +2283,7 @@ class TestConcurrentToolExecution:
 
         with (
             patch("run_agent.handle_function_call", return_value='{"success": true}'),
-            patch("agent.tool_executor.enforce_turn_budget", lambda *_args, **_kwargs: order.append("budget")),
+            patch("agent.tool_result_flow.enforce_turn_budget", lambda *_args, **_kwargs: order.append("budget")),
         ):
             agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
 

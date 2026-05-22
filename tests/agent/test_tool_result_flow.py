@@ -91,3 +91,74 @@ def test_finalize_tool_result_skips_execution_callbacks_when_blocked():
     agent.tool_progress_callback.assert_not_called()
     agent.tool_complete_callback.assert_not_called()
     assert messages[0]["content"] == 'content:{"error": "blocked"}|hint'
+
+
+def test_finalize_tool_results_enforces_budget_before_steer():
+    from agent.tool_result_flow import ToolResultContext, finalize_tool_results
+
+    agent = _agent()
+    messages = []
+    order = []
+    agent._apply_pending_steer_to_tool_results = lambda *_args, **_kwargs: order.append("steer")
+
+    with (
+        patch("agent.tool_result_flow.maybe_persist_tool_result", lambda **kw: kw["content"]),
+        patch("agent.tool_result_flow.enforce_turn_budget", lambda *_args, **_kwargs: order.append("budget")),
+    ):
+        finalized = finalize_tool_results(
+            agent,
+            [
+                ToolResultContext(
+                    name="web_search",
+                    args={"query": "x"},
+                    content='{"ok": true}',
+                    duration=0.5,
+                    call_id="call-1",
+                    task_id="task-1",
+                    messages=messages,
+                    blocked=False,
+                    is_error=False,
+                )
+            ],
+        )
+
+    assert len(finalized) == 1
+    assert order == ["budget", "steer"]
+    assert len(messages) == 1
+
+
+def test_finalize_tool_result_batch_enforces_budget_before_steer():
+    from agent.tool_result_flow import finalize_tool_result_batch
+
+    agent = _agent()
+    messages = [{"role": "tool", "content": "one"}, {"role": "tool", "content": "two"}]
+    order = []
+    agent._apply_pending_steer_to_tool_results = lambda *_args, **_kwargs: order.append("steer")
+
+    with patch("agent.tool_result_flow.enforce_turn_budget", lambda *_args, **_kwargs: order.append("budget")):
+        finalize_tool_result_batch(agent, messages, 2, "task-1")
+
+    assert order == ["budget", "steer"]
+
+
+def test_skip_message_helpers_build_tool_messages():
+    from agent.tool_result_flow import (
+        make_cancelled_tool_result_message,
+        make_not_started_tool_result_message,
+    )
+
+    cancelled = make_cancelled_tool_result_message("web_search", "call-1")
+    not_started = make_not_started_tool_result_message("read_file", "call-2")
+
+    assert cancelled == {
+        "role": "tool",
+        "name": "web_search",
+        "tool_name": "web_search",
+        "content": "[Tool execution cancelled — web_search was skipped due to user interrupt]",
+        "tool_call_id": "call-1",
+    }
+    assert not_started["name"] == "read_file"
+    assert not_started["tool_call_id"] == "call-2"
+    assert not_started["content"] == (
+        "[Tool execution skipped — read_file was not started. User sent a new message]"
+    )

@@ -1126,20 +1126,18 @@ def init_agent(
     # 400 errors on providers that enforce unique names (e.g. Xiaomi
     # MiMo via Nous Portal).
     if agent._memory_manager and agent.tools is not None:
-        _existing_tool_names = {
-            t.get("function", {}).get("name")
-            for t in agent.tools
-            if isinstance(t, dict)
-        }
-        for _schema in agent._memory_manager.get_all_tool_schemas():
-            _tname = _schema.get("name", "")
-            if _tname and _tname in _existing_tool_names:
-                continue  # already registered via plugin path
-            _wrapped = {"type": "function", "function": _schema}
-            agent.tools.append(_wrapped)
-            if _tname:
-                agent.valid_tool_names.add(_tname)
-                _existing_tool_names.add(_tname)
+        from agent.tool_catalog import merge_runtime_tool_schemas
+
+        _merge = merge_runtime_tool_schemas(
+            agent.tools,
+            agent._memory_manager.get_all_tool_schemas(),
+            source="runtime",
+            toolset="memory_provider",
+            source_metadata=getattr(agent, "_tool_source_metadata", None),
+        )
+        agent.tools = _merge.tools
+        agent.valid_tool_names = set(_merge.valid_names)
+        agent._tool_source_metadata = _merge.source_metadata
 
     # Skills config: nudge interval for skill creation reminders
     agent._skill_nudge_interval = 10
@@ -1437,21 +1435,19 @@ def init_agent(
     # ctx.register_tool(). Mirrors the memory tools dedup above.
     agent._context_engine_tool_names: set = set()
     if hasattr(agent, "context_compressor") and agent.context_compressor and agent.tools is not None:
-        _existing_tool_names = {
-            t.get("function", {}).get("name")
-            for t in agent.tools
-            if isinstance(t, dict)
-        }
-        for _schema in agent.context_compressor.get_tool_schemas():
-            _tname = _schema.get("name", "")
-            if _tname and _tname in _existing_tool_names:
-                continue  # already registered via plugin/cache path
-            _wrapped = {"type": "function", "function": _schema}
-            agent.tools.append(_wrapped)
-            if _tname:
-                agent.valid_tool_names.add(_tname)
-                agent._context_engine_tool_names.add(_tname)
-                _existing_tool_names.add(_tname)
+        from agent.tool_catalog import merge_runtime_tool_schemas
+
+        _merge = merge_runtime_tool_schemas(
+            agent.tools,
+            agent.context_compressor.get_tool_schemas(),
+            source="runtime",
+            toolset="context_engine",
+            source_metadata=getattr(agent, "_tool_source_metadata", None),
+        )
+        agent.tools = _merge.tools
+        agent.valid_tool_names = set(_merge.valid_names)
+        agent._tool_source_metadata = _merge.source_metadata
+        agent._context_engine_tool_names.update(_merge.added_names)
 
     # Notify context engine of session start
     if hasattr(agent, "context_compressor") and agent.context_compressor:

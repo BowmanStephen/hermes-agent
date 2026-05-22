@@ -3849,10 +3849,37 @@ class AIAgent:
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
-                     pre_tool_block_checked: bool = False) -> str:
+                     pre_tool_block_checked: bool = False,
+                     apply_guardrails: bool = True) -> str:
         """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool``."""
         from agent.agent_runtime_helpers import invoke_tool
-        return invoke_tool(self, function_name, function_args, effective_task_id, tool_call_id, messages, pre_tool_block_checked)
+        return invoke_tool(
+            self,
+            function_name,
+            function_args,
+            effective_task_id,
+            tool_call_id,
+            messages,
+            pre_tool_block_checked,
+            apply_guardrails,
+        )
+
+    def _invoke_tool_result(self, function_name: str, function_args: dict, effective_task_id: str,
+                            tool_call_id: Optional[str] = None, messages: list = None,
+                            pre_tool_block_checked: bool = False,
+                            apply_guardrails: bool = True):
+        """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool_result``."""
+        from agent.agent_runtime_helpers import invoke_tool_result
+        return invoke_tool_result(
+            self,
+            function_name,
+            function_args,
+            effective_task_id,
+            tool_call_id,
+            messages,
+            pre_tool_block_checked,
+            apply_guardrails,
+        )
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:

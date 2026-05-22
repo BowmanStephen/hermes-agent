@@ -1182,13 +1182,11 @@ class SessionStore:
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
-        Used by ``/resume`` to restore a previously-named session.
-        Ends the current session in SQLite (like reset), but instead of
-        generating a fresh session ID, re-uses ``target_session_id`` so the
-        old transcript is loaded on the next message. If the target session was
-        previously ended, re-open it so gateway resume semantics match the CLI.
+        This mutates only the gateway's session-key mapping. SQLite lifecycle
+        changes (ending the previous session, reopening the target) belong in
+        ``session_lifecycle`` so transcript invariants do not leak into this
+        JSON mapping store.
         """
-        db_end_session_id = None
         new_entry = None
 
         with self._lock:
@@ -1202,8 +1200,6 @@ class SessionStore:
             # Don't switch if already on that session
             if old_entry.session_id == target_session_id:
                 return old_entry
-
-            db_end_session_id = old_entry.session_id
 
             now = _now()
             new_entry = SessionEntry(
@@ -1219,18 +1215,6 @@ class SessionStore:
 
             self._entries[session_key] = new_entry
             self._save()
-
-        if self._db and db_end_session_id:
-            try:
-                self._db.end_session(db_end_session_id, "session_switch")
-            except Exception as e:
-                logger.debug("Session DB end_session failed: %s", e)
-
-        if self._db:
-            try:
-                self._db.reopen_session(target_session_id)
-            except Exception as e:
-                logger.debug("Session DB reopen_session failed: %s", e)
 
         return new_entry
 

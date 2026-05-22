@@ -4515,36 +4515,27 @@ class HermesCLI:
         # run() for immediate display).  In that case, conversation_history
         # is non-empty and we skip the DB round-trip.
         if self._resumed and self._session_db and not self.conversation_history:
-            session_meta = self._session_db.get_session(self.session_id)
-            if not session_meta:
+            try:
+                from session_lifecycle import SessionNotFound, resume_session
+                resume = resume_session(self._session_db, self.session_id)
+            except SessionNotFound:
                 _cprint(f"\033[1;31mSession not found: {self.session_id}{_RST}")
                 _cprint(f"{_DIM}Use a session ID from a previous CLI run (hermes sessions list).{_RST}")
                 return False
-            # If the requested session is the (empty) head of a compression
-            # chain, walk to the descendant that actually holds the messages.
-            # See #15000 and SessionDB.resolve_resume_session_id.
-            try:
-                resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
-            except Exception:
-                resolved_id = self.session_id
-            if resolved_id and resolved_id != self.session_id:
+            if resume.resolved_from_session_id:
                 ChatConsole().print(
-                    f"[{_DIM}]Session {_escape(self.session_id)} was compressed into "
-                    f"{_escape(resolved_id)}; resuming the descendant with your "
+                    f"[{_DIM}]Session {_escape(resume.resolved_from_session_id)} was compressed into "
+                    f"{_escape(resume.session_id)}; resuming the descendant with your "
                     f"transcript.[/]"
                 )
-                self.session_id = resolved_id
-                resolved_meta = self._session_db.get_session(self.session_id)
-                if resolved_meta:
-                    session_meta = resolved_meta
-            restored = self._session_db.get_messages_as_conversation(self.session_id)
+            self.session_id = resume.session_id
+            restored = resume.messages
             if restored:
-                restored = [m for m in restored if m.get("role") != "session_meta"]
                 self.conversation_history = restored
-                msg_count = len([m for m in restored if m.get("role") == "user"])
+                msg_count = resume.user_message_count
                 title_part = ""
-                if session_meta.get("title"):
-                    title_part = f" \"{session_meta['title']}\""
+                if resume.title:
+                    title_part = f" \"{resume.title}\""
                 ChatConsole().print(
                     f"[bold {_accent_hex()}]↻ Resumed session[/] "
                     f"[bold]{_escape(self.session_id)}[/]"
@@ -4555,15 +4546,6 @@ class HermesCLI:
                 ChatConsole().print(
                     f"[bold {_accent_hex()}]Session {_escape(self.session_id)} found but has no messages. Starting fresh.[/]"
                 )
-            # Re-open the session (clear ended_at so it's active again)
-            try:
-                self._session_db._conn.execute(
-                    "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
-                    (self.session_id,),
-                )
-                self._session_db._conn.commit()
-            except Exception:
-                pass
         
         try:
             runtime = runtime_override or {
@@ -4774,8 +4756,10 @@ class HermesCLI:
         if not self._resumed or not self._session_db:
             return False
 
-        session_meta = self._session_db.get_session(self.session_id)
-        if not session_meta:
+        try:
+            from session_lifecycle import SessionNotFound, resume_session
+            resume = resume_session(self._session_db, self.session_id)
+        except SessionNotFound:
             self._console_print(
                 f"[bold red]Session not found: {self.session_id}[/]"
             )
@@ -4785,30 +4769,20 @@ class HermesCLI:
             )
             return False
 
-        # If the requested session is the (empty) head of a compression chain,
-        # walk to the descendant that actually holds the messages. See #15000.
-        try:
-            resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
-        except Exception:
-            resolved_id = self.session_id
-        if resolved_id and resolved_id != self.session_id:
+        if resume.resolved_from_session_id:
             self._console_print(
-                f"[dim]Session {self.session_id} was compressed into "
-                f"{resolved_id}; resuming the descendant with your transcript.[/]"
+                f"[dim]Session {resume.resolved_from_session_id} was compressed into "
+                f"{resume.session_id}; resuming the descendant with your transcript.[/]"
             )
-            self.session_id = resolved_id
-            resolved_meta = self._session_db.get_session(self.session_id)
-            if resolved_meta:
-                session_meta = resolved_meta
+        self.session_id = resume.session_id
 
-        restored = self._session_db.get_messages_as_conversation(self.session_id)
+        restored = resume.messages
         if restored:
-            restored = [m for m in restored if m.get("role") != "session_meta"]
             self.conversation_history = restored
-            msg_count = len([m for m in restored if m.get("role") == "user"])
+            msg_count = resume.user_message_count
             title_part = ""
-            if session_meta.get("title"):
-                title_part = f' "{session_meta["title"]}"'
+            if resume.title:
+                title_part = f' "{resume.title}"'
             accent_color = _accent_hex()
             self._console_print(
                 f"[{accent_color}]↻ Resumed session [bold]{self.session_id}[/bold]"
@@ -4823,17 +4797,6 @@ class HermesCLI:
                 f"messages. Starting fresh.[/]"
             )
             return False
-
-        # Re-open the session (clear ended_at so it's active again)
-        try:
-            self._session_db._conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL "
-                "WHERE id = ?",
-                (self.session_id,),
-            )
-            self._session_db._conn.commit()
-        except Exception:
-            pass
 
         return True
 
@@ -6286,54 +6249,38 @@ class HermesCLI:
         resolved = _resolve_session_by_name_or_id(target)
         target_id = resolved or target
 
-        session_meta = self._session_db.get_session(target_id)
-        if not session_meta:
+        try:
+            from session_lifecycle import SessionNotFound, resume_session
+            resume = resume_session(
+                self._session_db,
+                target_id,
+                current_session_id=self.session_id,
+                end_current_reason="resumed_other",
+            )
+        except SessionNotFound:
             _cprint(f"  Session not found: {target}")
             _cprint("  Use /history or `hermes sessions list` to see available sessions.")
             return
 
-        # If the target is the empty head of a compression chain, redirect to
-        # the descendant that actually holds the transcript. See #15000.
-        try:
-            resolved_id = self._session_db.resolve_resume_session_id(target_id)
-        except Exception:
-            resolved_id = target_id
-        if resolved_id and resolved_id != target_id:
+        if resume.resolved_from_session_id:
             _cprint(
-                f"  Session {target_id} was compressed into {resolved_id}; "
+                f"  Session {resume.resolved_from_session_id} was compressed into {resume.session_id}; "
                 f"resuming the descendant with your transcript."
             )
-            target_id = resolved_id
-            resolved_meta = self._session_db.get_session(target_id)
-            if resolved_meta:
-                session_meta = resolved_meta
+        target_id = resume.session_id
 
         if target_id == self.session_id:
             _cprint("  Already on that session.")
             return
 
         old_session_id = self.session_id
-        # End current session
-        try:
-            self._session_db.end_session(self.session_id, "resumed_other")
-        except Exception:
-            pass
 
         # Switch to the target session
         self.session_id = target_id
         self._resumed = True
         self._pending_title = None
 
-        # Load conversation history (strip transcript-only metadata entries)
-        restored = self._session_db.get_messages_as_conversation(target_id)
-        restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
-        self.conversation_history = restored
-
-        # Re-open the target session so it's not marked as ended
-        try:
-            self._session_db.reopen_session(target_id)
-        except Exception:
-            pass
+        self.conversation_history = resume.messages
 
         # Sync the agent if already initialised
         if self.agent:
@@ -6366,8 +6313,8 @@ class HermesCLI:
             except Exception:
                 pass
 
-        title_part = f" \"{session_meta['title']}\"" if session_meta.get("title") else ""
-        msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
+        title_part = f" \"{resume.title}\"" if resume.title else ""
+        msg_count = resume.user_message_count
         if self.conversation_history:
             _cprint(
                 f"  ↻ Resumed session {target_id}{title_part}"
@@ -6428,78 +6375,35 @@ class HermesCLI:
         parts = cmd_original.split(None, 1)
         branch_name = parts[1].strip() if len(parts) > 1 else ""
 
-        # Generate the new session ID
-        now = datetime.now()
-        timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-        short_uuid = uuid.uuid4().hex[:6]
-        new_session_id = f"{timestamp_str}_{short_uuid}"
-
-        # Determine branch title
-        if branch_name:
-            branch_title = branch_name
-        else:
-            # Auto-generate from the current session title
-            current_title = None
-            if self._session_db:
-                current_title = self._session_db.get_session_title(self.session_id)
-            base = current_title or "branch"
-            branch_title = self._session_db.get_next_title_in_lineage(base)
-
-        # Save the current session's state before branching
         parent_session_id = self.session_id
-
-        # End the old session
+        now = datetime.now()
         try:
-            self._session_db.end_session(self.session_id, "branched")
-        except Exception:
-            pass
-
-        # Create the new session with parent link
-        try:
-            self._session_db.create_session(
-                session_id=new_session_id,
+            from session_lifecycle import branch_session
+            branch = branch_session(
+                self._session_db,
+                parent_session_id=parent_session_id,
+                history=self.conversation_history,
+                branch_title=branch_name or None,
                 source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                 model=self.model,
                 model_config={
                     "max_iterations": self.max_turns,
                     "reasoning_config": self.reasoning_config,
                 },
-                parent_session_id=parent_session_id,
             )
         except Exception as e:
             _cprint(f"  Failed to create branch session: {e}")
             return
 
-        # Copy conversation history to the new session
-        for msg in self.conversation_history:
-            try:
-                self._session_db.append_message(
-                    session_id=new_session_id,
-                    role=msg.get("role", "user"),
-                    content=msg.get("content"),
-                    tool_name=msg.get("tool_name") or msg.get("name"),
-                    tool_calls=msg.get("tool_calls"),
-                    tool_call_id=msg.get("tool_call_id"),
-                    reasoning=msg.get("reasoning"),
-                )
-            except Exception:
-                pass  # Best-effort copy
-
-        # Set title on the branch
-        try:
-            self._session_db.set_session_title(new_session_id, branch_title)
-        except Exception:
-            pass
-
         # Switch to the new session
-        self.session_id = new_session_id
+        self.session_id = branch.session_id
         self.session_start = now
         self._pending_title = None
         self._resumed = True  # Prevents auto-title generation
 
         # Sync the agent
         if self.agent:
-            self.agent.session_id = new_session_id
+            self.agent.session_id = branch.session_id
             self.agent.session_start = now
             self.agent.reset_session_state()
             if hasattr(self.agent, "_last_flushed_db_idx"):
@@ -6521,7 +6425,7 @@ class HermesCLI:
                 _mm = getattr(self.agent, "_memory_manager", None)
                 if _mm is not None:
                     _mm.on_session_switch(
-                        new_session_id,
+                        branch.session_id,
                         parent_session_id=parent_session_id or "",
                         reset=False,
                         reason="branch",
@@ -6529,13 +6433,12 @@ class HermesCLI:
             except Exception:
                 pass
 
-        msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
         _cprint(
-            f"  ⑂ Branched session \"{branch_title}\""
-            f" ({msg_count} user message{'s' if msg_count != 1 else ''})"
+            f"  ⑂ Branched session \"{branch.title}\""
+            f" ({branch.user_message_count} user message{'s' if branch.user_message_count != 1 else ''})"
         )
         _cprint(f"  Original session: {parent_session_id}")
-        _cprint(f"  Branch session:   {new_session_id}")
+        _cprint(f"  Branch session:   {branch.session_id}")
 
     def save_conversation(self):
         """Save the current conversation to a JSON snapshot under ~/.hermes/sessions/saved/.
@@ -7817,12 +7720,19 @@ class HermesCLI:
         cmd_lower = command.lower().strip()
         cmd_original = command.strip()
 
-        # Resolve aliases via central registry so adding an alias is a one-line
-        # change in hermes_cli/commands.py instead of touching every dispatch site.
-        from hermes_cli.commands import resolve_command as _resolve_cmd
-        _base_word = cmd_lower.split()[0].lstrip("/")
-        _cmd_def = _resolve_cmd(_base_word)
-        canonical = _cmd_def.name if _cmd_def else _base_word
+        # Resolve aliases through the shared dispatch seam; adapters should
+        # branch on canonical handler keys, not the typed token.
+        from hermes_cli.commands import CommandSurface, resolve_command_invocation
+        _cmd_invocation = resolve_command_invocation(
+            cmd_original,
+            surface=CommandSurface.CLI,
+        )
+        _base_word = (
+            _cmd_invocation.raw_name
+            if _cmd_invocation
+            else cmd_lower.split()[0].lstrip("/")
+        )
+        canonical = _cmd_invocation.canonical_name if _cmd_invocation else _base_word
         
         if canonical in {"quit", "exit"}:
             # Parse --delete flag: /exit --delete also removes the current
@@ -8159,11 +8069,28 @@ class HermesCLI:
         elif canonical == "busy":
             self._handle_busy_command(cmd_original)
         else:
-            # Check for user-defined quick commands (bypass agent loop, no LLM call)
-            base_cmd = cmd_lower.split()[0]
+            from hermes_cli.commands import CommandSurface, resolve_command_dispatch
+
+            # Shared fallback order: quick command, plugin command, skill bundle,
+            # skill command, then prefix matching. Built-ins have already been
+            # handled above and still take precedence over quick aliases.
             quick_commands = self.config.get("quick_commands", {})
-            if base_cmd.lstrip("/") in quick_commands:
-                qcmd = quick_commands[base_cmd.lstrip("/")]
+            dispatch = resolve_command_dispatch(
+                cmd_original,
+                surface=CommandSurface.CLI,
+                quick_commands=quick_commands,
+                plugin_commands=_get_plugin_cmd_handler_names(),
+                skill_bundles=get_skill_bundles(),
+                skill_commands=_skill_commands,
+            )
+            base_cmd = (
+                f"/{dispatch.invocation.raw_name}"
+                if dispatch.invocation.raw_name
+                else cmd_lower.split()[0]
+            )
+
+            if dispatch.route == "quick_exec":
+                qcmd = quick_commands[dispatch.handler_key]
                 if qcmd.get("type") == "exec":
                     import subprocess
                     exec_cmd = qcmd.get("command", "")
@@ -8186,24 +8113,32 @@ class HermesCLI:
                             self._console_print(f"[bold red]Quick command error: {e}[/]")
                     else:
                         self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
-                elif qcmd.get("type") == "alias":
-                    target = qcmd.get("target", "").strip()
-                    if target:
-                        target = target if target.startswith("/") else f"/{target}"
-                        user_args = cmd_original[len(base_cmd):].strip()
-                        aliased_command = f"{target} {user_args}".strip()
-                        return self.process_command(aliased_command)
-                    else:
-                        self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
+            elif dispatch.route == "quick_alias":
+                target = (dispatch.target or "").strip()
+                if target:
+                    target = target if target.startswith("/") else f"/{target}"
+                    user_args = cmd_original[len(base_cmd):].strip()
+                    aliased_command = f"{target} {user_args}".strip()
+                    return self.process_command(aliased_command)
                 else:
-                    self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
+                    self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
+            elif dispatch.route == "quick_unsupported":
+                self._console_print(
+                    f"[bold red]Quick command '{base_cmd}' has unsupported type "
+                    "(supported: 'exec', 'alias')[/]"
+                )
+            elif dispatch.route == "unavailable":
+                self._console_print(
+                    f"[bold red]Command '/{dispatch.invocation.canonical_name}' "
+                    "isn't available in the interactive CLI[/]"
+                )
             # Check for plugin-registered slash commands
-            elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
+            elif dispatch.route == "plugin":
                 from hermes_cli.plugins import (
                     get_plugin_command_handler,
                     resolve_plugin_command_result,
                 )
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+                plugin_handler = get_plugin_command_handler(dispatch.handler_key)
                 if plugin_handler:
                     user_args = cmd_original[len(base_cmd):].strip()
                     try:
@@ -8216,14 +8151,15 @@ class HermesCLI:
                         _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
             # Skill bundles take precedence over individual skills — /<bundle>
             # loads multiple skills at once. Rescans cheaply when files change.
-            elif base_cmd in get_skill_bundles():
+            elif dispatch.route == "skill_bundle":
                 user_instruction = cmd_original[len(base_cmd):].strip()
+                bundle_key = f"/{dispatch.handler_key}"
                 bundle_result = build_bundle_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    bundle_key, user_instruction, task_id=self.session_id
                 )
                 if bundle_result:
                     msg, loaded_names, missing = bundle_result
-                    bundle_info = get_skill_bundles()[base_cmd]
+                    bundle_info = get_skill_bundles()[bundle_key]
                     print(
                         f"\n⚡ Loading bundle: {bundle_info['name']} "
                         f"({len(loaded_names)} skills)"
@@ -8239,13 +8175,14 @@ class HermesCLI:
                         f"[bold red]Failed to load bundle for {base_cmd}[/]"
                     )
             # Check for skill slash commands (/gif-search, /axolotl, etc.)
-            elif base_cmd in _skill_commands:
+            elif dispatch.route == "skill":
                 user_instruction = cmd_original[len(base_cmd):].strip()
+                skill_key = f"/{dispatch.handler_key}"
                 msg = build_skill_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    skill_key, user_instruction, task_id=self.session_id
                 )
                 if msg:
-                    skill_name = _skill_commands[base_cmd]["name"]
+                    skill_name = _skill_commands[skill_key]["name"]
                     print(f"\n⚡ Loading skill: {skill_name}")
                     if hasattr(self, '_pending_input'):
                         self._pending_input.put(msg)

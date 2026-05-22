@@ -31,8 +31,6 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -373,40 +371,33 @@ def compress_context(
     agent._cached_system_prompt = new_system_prompt
 
     if agent._session_db:
+        previous_session_db_created = getattr(agent, "_session_db_created", False)
         try:
-            # Propagate title to the new session with auto-numbering
-            old_title = agent._session_db.get_session_title(agent.session_id)
             # Trigger memory extraction on the old session before it rotates.
             agent.commit_memory_session(messages)
-            agent._session_db.end_session(agent.session_id, "compression")
             old_session_id = agent.session_id
-            agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            from session_lifecycle import split_session_for_compression
+            agent._session_db_created = False
+            split = split_session_for_compression(
+                agent._session_db,
+                old_session_id=old_session_id,
+                source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                model=agent.model,
+                model_config=agent._session_init_model_config,
+                system_prompt=new_system_prompt,
+            )
+            agent.session_id = split.session_id
             os.environ["HERMES_SESSION_ID"] = agent.session_id
             try:
                 from gateway.session_context import _SESSION_ID
                 _SESSION_ID.set(agent.session_id)
             except Exception:
                 pass
-            agent._session_db_created = False
-            agent._session_db.create_session(
-                session_id=agent.session_id,
-                source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                model=agent.model,
-                model_config=agent._session_init_model_config,
-                parent_session_id=old_session_id,
-            )
             agent._session_db_created = True
-            # Auto-number the title for the continuation session
-            if old_title:
-                try:
-                    new_title = agent._session_db.get_next_title_in_lineage(old_title)
-                    agent._session_db.set_session_title(agent.session_id, new_title)
-                except (ValueError, Exception) as e:
-                    logger.debug("Could not propagate title on compression: %s", e)
-            agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
             # Reset flush cursor — new session starts with no messages written
             agent._last_flushed_db_idx = 0
         except Exception as e:
+            agent._session_db_created = previous_session_db_created
             logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
 
     # Notify the context engine that the session_id rotated because of

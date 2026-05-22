@@ -267,6 +267,54 @@ async def test_managed_topic_binding_reuses_restored_session_over_static_lane_se
 
 
 @pytest.mark.asyncio
+async def test_stale_topic_binding_does_not_repoint_session_store(monkeypatch):
+    import gateway.run as gateway_run
+
+    class FakeSessionDB:
+        def is_telegram_topic_mode_enabled(self, *, chat_id, user_id):
+            return True
+
+        def list_telegram_topic_bindings_for_chat(self, *, chat_id):
+            return [
+                {
+                    "thread_id": "17585",
+                    "user_id": "208214988",
+                    "session_id": "missing-session",
+                }
+            ]
+
+        def get_telegram_topic_binding(self, *, chat_id, thread_id):
+            return {"session_id": "missing-session"}
+
+        def get_session(self, session_id):
+            return None
+
+    runner = _make_runner(session_db=FakeSessionDB())
+    captured = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["session_id"] = kwargs.get("session_id")
+        return {
+            "success": True,
+            "final_response": "lane response",
+            "session_id": kwargs.get("session_id"),
+            "messages": [],
+        }
+
+    runner._run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("continue", thread_id="17585"))
+
+    assert result == "lane response"
+    assert captured["session_id"] == "sess-topic"
+    runner.session_store.switch_session.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_telegram_group_prompt_is_not_topic_lobby_even_when_dm_topic_mode_enabled(
     tmp_path, monkeypatch
 ):

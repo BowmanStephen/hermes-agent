@@ -2309,8 +2309,11 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     try:
-        db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
+        from session_lifecycle import resume_session
+
+        resume = resume_session(db, target)
+        target = resume.session_id
+        history = resume.messages
         display_history = db.get_messages_as_conversation(
             target, include_ancestors=True
         )
@@ -2729,25 +2732,17 @@ def _(rid, params: dict) -> dict:
     new_key = _new_session_key()
     branch_name = params.get("name", "")
     try:
-        if branch_name:
-            title = branch_name
-        else:
-            current = db.get_session_title(old_key) or "branch"
-            title = (
-                db.get_next_title_in_lineage(current)
-                if hasattr(db, "get_next_title_in_lineage")
-                else f"{current} (branch)"
-            )
-        db.create_session(
-            new_key, source="tui", model=_resolve_model(), parent_session_id=old_key
+        from session_lifecycle import branch_session
+
+        branch = branch_session(
+            db,
+            parent_session_id=old_key,
+            history=history,
+            branch_title=branch_name or None,
+            source="tui",
+            model=_resolve_model(),
+            new_session_id=new_key,
         )
-        for msg in history:
-            db.append_message(
-                session_id=new_key,
-                role=msg.get("role", "user"),
-                content=msg.get("content"),
-            )
-        db.set_session_title(new_key, title)
     except Exception as e:
         return _err(rid, 5008, f"branch failed: {e}")
     new_sid = uuid.uuid4().hex[:8]
@@ -2762,7 +2757,7 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
+    return _ok(rid, {"session_id": new_sid, "title": branch.title, "parent": old_key})
 
 
 @method("session.interrupt")
@@ -4606,14 +4601,18 @@ def _(rid, params: dict) -> dict:
 @method("command.resolve")
 def _(rid, params: dict) -> dict:
     try:
-        from hermes_cli.commands import resolve_command
+        from hermes_cli.commands import CommandSurface, resolve_command_invocation
 
-        r = resolve_command(params.get("name", ""))
-        if r:
+        invocation = resolve_command_invocation(
+            name=params.get("name", ""),
+            surface=CommandSurface.TUI,
+        )
+        if invocation and invocation.definition:
+            r = invocation.definition
             return _ok(
                 rid,
                 {
-                    "canonical": r.name,
+                    "canonical": invocation.canonical_name,
                     "description": r.description,
                     "category": r.category,
                 },
@@ -4625,25 +4624,57 @@ def _(rid, params: dict) -> dict:
 
 def _resolve_name(name: str) -> str:
     try:
-        from hermes_cli.commands import resolve_command
+        from hermes_cli.commands import CommandSurface, resolve_command_invocation
 
-        r = resolve_command(name)
-        return r.name if r else name
+        invocation = resolve_command_invocation(name=name, surface=CommandSurface.TUI)
+        return invocation.canonical_name if invocation else name
     except Exception:
         return name
 
 
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
-    name, arg = params.get("name", "").lstrip("/"), params.get("arg", "")
-    resolved = _resolve_name(name)
-    if resolved != name:
-        name = resolved
+    raw_name, arg = params.get("name", "").lstrip("/"), params.get("arg", "")
+    name = _resolve_name(raw_name)
     session = _sessions.get(params.get("session_id", ""))
 
     qcmds = _load_cfg().get("quick_commands", {})
-    if name in qcmds:
-        qc = qcmds[name]
+    try:
+        from hermes_cli.commands import CommandSurface, resolve_command_dispatch
+
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+            plugin_commands = set(get_plugin_commands() or {})
+        except Exception:
+            plugin_commands = set()
+        try:
+            from agent.skill_bundles import get_skill_bundles
+            skill_bundles = get_skill_bundles()
+        except Exception:
+            skill_bundles = {}
+        try:
+            from agent.skill_commands import scan_skill_commands
+            skill_commands = scan_skill_commands()
+        except Exception:
+            skill_commands = {}
+
+        dispatch = resolve_command_dispatch(
+            name=raw_name,
+            args=arg,
+            surface=CommandSurface.TUI,
+            quick_commands=qcmds,
+            plugin_commands=plugin_commands,
+            skill_bundles=skill_bundles,
+            skill_commands=skill_commands,
+        )
+    except Exception:
+        dispatch = None
+    if dispatch is not None and dispatch.route in {
+        "quick_exec",
+        "quick_alias",
+        "quick_unsupported",
+    }:
+        qc = qcmds.get(dispatch.handler_key, {})
         if qc.get("type") == "exec":
             r = subprocess.run(
                 qc.get("command", ""),
@@ -4666,6 +4697,17 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"type": "exec", "output": output})
         if qc.get("type") == "alias":
             return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
+        return _err(
+            rid,
+            4018,
+            f"quick command '/{dispatch.invocation.raw_name}' has unsupported type",
+        )
+    if dispatch is not None and dispatch.route == "unavailable":
+        return _err(
+            rid,
+            4018,
+            f"/{dispatch.invocation.canonical_name} is unavailable: not available in the TUI",
+        )
 
     try:
         from hermes_cli.plugins import (
@@ -4673,12 +4715,48 @@ def _(rid, params: dict) -> dict:
             resolve_plugin_command_result,
         )
 
-        handler = get_plugin_command_handler(name)
-        if handler:
+        handler_name = (
+            dispatch.handler_key
+            if dispatch is not None and dispatch.route == "plugin"
+            else name
+        )
+        handler = get_plugin_command_handler(handler_name)
+        if handler and (
+            dispatch is None
+            or dispatch.route in {"plugin", "unknown"}
+        ):
             result = resolve_plugin_command_result(handler(arg))
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
+
+    if dispatch is not None and dispatch.route == "skill_bundle":
+        try:
+            from agent.skill_bundles import (
+                build_bundle_invocation_message,
+                get_skill_bundles,
+            )
+
+            bundle_key = f"/{dispatch.handler_key}"
+            bundles = get_skill_bundles()
+            if bundle_key is not None:
+                bundle_result = build_bundle_invocation_message(
+                    bundle_key,
+                    arg,
+                    task_id=session.get("session_key", "") if session else "",
+                )
+                if bundle_result:
+                    msg, _loaded, _missing = bundle_result
+                    return _ok(
+                        rid,
+                        {
+                            "type": "skill",
+                            "message": msg,
+                            "name": bundles.get(bundle_key, {}).get("name", name),
+                        },
+                    )
+        except Exception:
+            pass
 
     try:
         from agent.skill_commands import (
@@ -4687,8 +4765,15 @@ def _(rid, params: dict) -> dict:
         )
 
         cmds = scan_skill_commands()
-        key = f"/{name}"
-        if key in cmds:
+        key = (
+            f"/{dispatch.handler_key}"
+            if dispatch is not None and dispatch.route == "skill"
+            else f"/{name}"
+        )
+        if (
+            dispatch is None
+            or dispatch.route in {"skill", "unknown"}
+        ) and key in cmds:
             msg = build_skill_invocation_message(
                 key, arg, task_id=session.get("session_key", "") if session else ""
             )
@@ -4852,6 +4937,13 @@ def _(rid, params: dict) -> dict:
                     ),
                 },
             )
+
+    if dispatch is not None and dispatch.route == "builtin":
+        return _err(
+            rid,
+            4018,
+            f"/{dispatch.invocation.canonical_name} is unavailable: not available in the TUI",
+        )
 
     return _err(rid, 4018, f"not a quick/plugin/skill command: {name}")
 
@@ -5600,17 +5692,70 @@ def _(rid, params: dict) -> dict:
                 "snapshot restore mutates live config/state; use command.dispatch for /snapshot restore",
             )
 
+    command_dispatch = None
     try:
-        from agent.skill_commands import get_skill_commands
-
-        _cmd_key = f"/{_cmd_base}"
-        if _cmd_key in get_skill_commands():
-            return _err(
-                rid, 4018, f"skill command: use command.dispatch for {_cmd_key}"
-            )
+        from hermes_cli.commands import CommandSurface, resolve_command_dispatch
     except Exception:
-        pass
+        resolve_command_dispatch = None
+        CommandSurface = None
+    if resolve_command_dispatch is not None and CommandSurface is not None:
+        qcmds = _load_cfg().get("quick_commands", {})
+        if not isinstance(qcmds, dict):
+            qcmds = {}
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+            plugin_commands = set(get_plugin_commands() or {})
+        except Exception:
+            plugin_commands = set()
+        try:
+            from agent.skill_bundles import get_skill_bundles
+            skill_bundles = get_skill_bundles()
+        except Exception:
+            skill_bundles = {}
+        try:
+            from agent.skill_commands import get_skill_commands
+            skill_commands = get_skill_commands()
+        except Exception:
+            skill_commands = {}
 
+        command_dispatch = resolve_command_dispatch(
+            name=_cmd_base,
+            args=_cmd_arg,
+            surface=CommandSurface.TUI,
+            quick_commands=qcmds,
+            plugin_commands=plugin_commands,
+            skill_bundles=skill_bundles,
+            skill_commands=skill_commands,
+        )
+    if command_dispatch is not None:
+        if command_dispatch.route in {
+            "quick_exec",
+            "quick_alias",
+            "quick_unsupported",
+        }:
+            return _err(
+                rid,
+                4018,
+                f"quick command: use command.dispatch for /{_cmd_base}",
+            )
+        if command_dispatch.route == "skill_bundle":
+            return _err(
+                rid,
+                4018,
+                f"skill bundle: use command.dispatch for /{command_dispatch.handler_key}",
+            )
+        if command_dispatch.route == "skill":
+            return _err(
+                rid,
+                4018,
+                f"skill command: use command.dispatch for /{command_dispatch.handler_key}",
+            )
+        if command_dispatch.route == "unavailable":
+            return _err(
+                rid,
+                4018,
+                f"command unavailable in TUI: /{command_dispatch.invocation.canonical_name}",
+            )
     plugin_handler = None
     resolve_plugin_command_result = None
     if _cmd_base:
@@ -5620,7 +5765,12 @@ def _(rid, params: dict) -> dict:
                 resolve_plugin_command_result,
             )
 
-            plugin_handler = get_plugin_command_handler(_cmd_base)
+            plugin_name = (
+                command_dispatch.handler_key
+                if command_dispatch is not None and command_dispatch.route == "plugin"
+                else _cmd_base
+            )
+            plugin_handler = get_plugin_command_handler(plugin_name)
         except Exception:
             plugin_handler = None
             resolve_plugin_command_result = None

@@ -8,6 +8,7 @@ from hermes_cli.commands import (
     COMMANDS,
     COMMANDS_BY_CATEGORY,
     CommandDef,
+    CommandSurface,
     GATEWAY_KNOWN_COMMANDS,
     SUBCOMMANDS,
     SlashCommandAutoSuggest,
@@ -20,7 +21,10 @@ from hermes_cli.commands import (
     _sanitize_telegram_name,
     discord_skill_commands,
     gateway_help_lines,
+    resolve_command_dispatch,
+    resolve_command_invocation,
     resolve_command,
+    select_command_handler,
     slack_app_manifest,
     slack_native_slashes,
     slack_subcommand_map,
@@ -123,6 +127,127 @@ class TestResolveCommand:
     def test_unknown_returns_none(self):
         assert resolve_command("nonexistent") is None
         assert resolve_command("") is None
+
+
+class TestCommandDispatch:
+    def test_invocation_canonicalizes_alias_and_preserves_args(self):
+        invocation = resolve_command_invocation(
+            "/bg Summarize this",
+            surface=CommandSurface.CLI,
+        )
+
+        assert invocation is not None
+        assert invocation.raw_name == "bg"
+        assert invocation.canonical_name == "background"
+        assert invocation.args == "Summarize this"
+        assert invocation.definition is resolve_command("background")
+
+    def test_invocation_accepts_name_and_args_without_raw_text(self):
+        invocation = resolve_command_invocation(name="codex_runtime", args="auto")
+
+        assert invocation is not None
+        assert invocation.raw_name == "codex_runtime"
+        assert invocation.canonical_name == "codex-runtime"
+        assert invocation.args == "auto"
+
+    def test_handler_selection_is_surface_specific(self):
+        assert select_command_handler(CommandSurface.CLI, "bg").handler_key == "background"
+        assert select_command_handler(CommandSurface.GATEWAY, "bg").handler_key == "background"
+        assert select_command_handler(CommandSurface.TUI, "q").handler_key == "queue"
+
+    def test_handler_selection_rejects_command_unavailable_on_surface(self):
+        assert select_command_handler(CommandSurface.CLI, "topic") is None
+        assert select_command_handler(CommandSurface.GATEWAY, "config") is None
+
+    def test_dispatch_distinguishes_known_command_unavailable_on_surface(self):
+        dispatch = resolve_command_dispatch("/config", surface=CommandSurface.GATEWAY)
+
+        assert dispatch.route == "unavailable"
+        assert dispatch.handler_key == "unavailable"
+        assert dispatch.invocation.canonical_name == "config"
+
+    def test_dispatch_prefers_builtin_over_quick_alias(self):
+        dispatch = resolve_command_dispatch(
+            "/bg hello",
+            surface=CommandSurface.GATEWAY,
+            quick_commands={"bg": {"type": "alias", "target": "/status"}},
+        )
+
+        assert dispatch.route == "builtin"
+        assert dispatch.invocation.canonical_name == "background"
+
+    def test_dispatch_reports_surface_unavailable_builtin(self):
+        dispatch = resolve_command_dispatch("/topic", surface=CommandSurface.CLI)
+
+        assert dispatch.route == "unavailable"
+        assert dispatch.invocation.canonical_name == "topic"
+
+    def test_dispatch_routes_unknown_quick_alias(self):
+        dispatch = resolve_command_dispatch(
+            "/shipit now",
+            surface=CommandSurface.CLI,
+            quick_commands={"shipit": {"type": "alias", "target": "/kanban dispatch"}},
+        )
+
+        assert dispatch.route == "quick_alias"
+        assert dispatch.handler_key == "shipit"
+        assert dispatch.target == "/kanban dispatch"
+
+    def test_dispatch_accepts_slash_prefixed_quick_command_keys(self):
+        dispatch = resolve_command_dispatch(
+            "/shipit now",
+            surface=CommandSurface.CLI,
+            quick_commands={"/shipit": {"type": "exec", "command": "echo ok"}},
+        )
+
+        assert dispatch.route == "quick_exec"
+        assert dispatch.handler_key == "/shipit"
+
+    def test_dispatch_routes_plugin_before_skill(self):
+        dispatch = resolve_command_dispatch(
+            "/metricas today",
+            surface=CommandSurface.TUI,
+            plugin_commands={"metricas"},
+            skill_commands={"/metricas": {"name": "Metricas"}},
+        )
+
+        assert dispatch.route == "plugin"
+        assert dispatch.handler_key == "metricas"
+
+    def test_dispatch_routes_skill_bundle_before_skill(self):
+        dispatch = resolve_command_dispatch(
+            "/security audit",
+            surface=CommandSurface.CLI,
+            skill_bundles={"/security": {"name": "Security Bundle"}},
+            skill_commands={"/security": {"name": "Security Skill"}},
+        )
+
+        assert dispatch.route == "skill_bundle"
+        assert dispatch.handler_key == "security"
+
+    def test_dispatch_gateway_normalizes_underscore_skill_names(self):
+        plugin_dispatch = resolve_command_dispatch(
+            "/my_plugin_cmd run",
+            surface=CommandSurface.GATEWAY,
+            plugin_commands={"my-plugin-cmd"},
+        )
+        bundle_dispatch = resolve_command_dispatch(
+            "/backend_dev audit",
+            surface=CommandSurface.GATEWAY,
+            skill_bundles={"/backend-dev": {"name": "Backend Dev"}},
+        )
+        skill_dispatch = resolve_command_dispatch(
+            "/claude_code help",
+            surface=CommandSurface.GATEWAY,
+            skill_commands={"/claude-code": {"name": "Claude Code"}},
+        )
+
+        assert plugin_dispatch.route == "plugin"
+        assert plugin_dispatch.handler_key == "my-plugin-cmd"
+        assert bundle_dispatch.route == "skill_bundle"
+        assert bundle_dispatch.handler_key == "backend-dev"
+        assert skill_dispatch.route == "skill"
+        assert skill_dispatch.handler_key == "claude-code"
 
 
 # ---------------------------------------------------------------------------
@@ -1775,6 +1900,21 @@ class TestPluginCommandEnumeration:
         })
         assert is_gateway_known_command("metricas") is True
         assert is_gateway_known_command("definitely-not-registered") is False
+
+    def test_is_gateway_known_command_normalizes_telegram_plugin_names(self, monkeypatch):
+        """Telegram's underscored plugin command form should match hyphenated plugin names."""
+        from hermes_cli.commands import is_gateway_known_command
+
+        self._patch_plugin_commands(monkeypatch, {
+            "my-plugin-cmd": {
+                "handler": lambda _a: "ok",
+                "description": "Plugin command",
+                "args_hint": "",
+                "plugin": "p",
+            }
+        })
+        assert is_gateway_known_command("my_plugin_cmd") is True
+        assert is_gateway_known_command("my-plugin-cmd") is True
 
     def test_is_gateway_known_command_still_recognizes_builtins(self, monkeypatch):
         """Built-in commands must remain known even when plugin discovery fails."""

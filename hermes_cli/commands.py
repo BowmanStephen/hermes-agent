@@ -18,6 +18,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from utils import is_truthy_value
@@ -55,6 +56,48 @@ class CommandDef:
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
     gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
+
+
+class CommandSurface(str, Enum):
+    """UI surface that is asking for slash-command dispatch."""
+
+    CLI = "cli"
+    GATEWAY = "gateway"
+    TUI = "tui"
+
+
+@dataclass(frozen=True)
+class SlashCommandInvocation:
+    """A parsed slash command with registry alias resolution applied."""
+
+    raw_text: str
+    raw_name: str
+    canonical_name: str
+    args: str
+    surface: CommandSurface
+    definition: CommandDef | None = None
+
+    @property
+    def is_builtin(self) -> bool:
+        return self.definition is not None
+
+
+@dataclass(frozen=True)
+class CommandHandlerSelection:
+    """The built-in handler selected for an invocation on a UI surface."""
+
+    invocation: SlashCommandInvocation
+    handler_key: str
+
+
+@dataclass(frozen=True)
+class SlashCommandDispatch:
+    """Dispatch classification shared by CLI, gateway, and TUI adapters."""
+
+    invocation: SlashCommandInvocation
+    route: str
+    handler_key: str
+    target: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +289,253 @@ def resolve_command(name: str) -> CommandDef | None:
     return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
 
 
+def _coerce_surface(surface: CommandSurface | str) -> CommandSurface:
+    if isinstance(surface, CommandSurface):
+        return surface
+    try:
+        return CommandSurface(str(surface))
+    except ValueError:
+        return CommandSurface.CLI
+
+
+def _normalize_command_args(args: str) -> str:
+    """Normalize mobile punctuation quirks in slash-command arguments."""
+    return (
+        (args or "")
+        .replace("\u2014\u2014", "--")
+        .replace("\u2014", "--")
+        .replace("\u2013", "-")
+    )
+
+
+def _split_slash_text(text: str) -> tuple[str, str, str] | None:
+    """Return ``(raw_text, command_name, args)`` for a slash command.
+
+    Mirrors gateway ``MessageEvent.get_command()`` rules: command names are
+    lower-cased, bot suffixes like ``/help@bot`` are stripped, and path-like
+    tokens containing ``/`` are rejected so ``/tmp/file`` is not treated as a
+    slash command.
+    """
+    raw_text = (text or "").strip()
+    if not raw_text.startswith("/"):
+        return None
+    parts = raw_text.split(maxsplit=1)
+    raw_name = parts[0][1:].lower() if parts else ""
+    if raw_name and "@" in raw_name:
+        raw_name = raw_name.split("@", 1)[0]
+    if not raw_name or "/" in raw_name:
+        return None
+    args = _normalize_command_args(parts[1] if len(parts) > 1 else "")
+    return raw_text, raw_name, args
+
+
+def resolve_command_invocation(
+    text: str | None = None,
+    *,
+    name: str | None = None,
+    args: str = "",
+    surface: CommandSurface | str = CommandSurface.CLI,
+) -> SlashCommandInvocation | None:
+    """Parse and resolve a slash command for a specific UI surface.
+
+    Callers may pass either the raw slash text (``/bg hello``) or a separately
+    extracted command name plus args. Alias resolution is centralized here so
+    adapters do not need to know whether ``/bg`` maps to ``/background``.
+    """
+    resolved_surface = _coerce_surface(surface)
+    raw_text = (text or "").strip()
+    if text is not None:
+        split = _split_slash_text(text)
+        if split is None:
+            return None
+        raw_text, raw_name, parsed_args = split
+    else:
+        raw_name = (name or "").lower().lstrip("/")
+        if raw_name and "@" in raw_name:
+            raw_name = raw_name.split("@", 1)[0]
+        if not raw_name or "/" in raw_name:
+            return None
+        parsed_args = _normalize_command_args(args)
+        raw_text = f"/{raw_name} {parsed_args}".strip()
+
+    definition = resolve_command(raw_name)
+    canonical_name = definition.name if definition else raw_name
+    return SlashCommandInvocation(
+        raw_text=raw_text,
+        raw_name=raw_name,
+        canonical_name=canonical_name,
+        args=parsed_args,
+        surface=resolved_surface,
+        definition=definition,
+    )
+
+
+def _surface_allows_command(
+    surface: CommandSurface,
+    cmd: CommandDef,
+    *,
+    for_dispatch: bool = True,
+) -> bool:
+    """Return whether a built-in command belongs on a surface.
+
+    Config-gated gateway commands are still dispatchable even when hidden from
+    help/menus; existing handlers are responsible for runtime semantics.
+    """
+    gateway_only = bool(getattr(cmd, "gateway_only", False))
+    cli_only = bool(getattr(cmd, "cli_only", False))
+    gateway_config_gate = getattr(cmd, "gateway_config_gate", None)
+    if surface in {CommandSurface.CLI, CommandSurface.TUI}:
+        return not gateway_only
+    if surface is CommandSurface.GATEWAY:
+        if not cli_only:
+            return True
+        if gateway_config_gate and for_dispatch:
+            return True
+        if gateway_config_gate:
+            return _is_gateway_available(cmd)
+    return False
+
+
+def select_command_handler(
+    surface: CommandSurface | str,
+    name: str,
+) -> CommandHandlerSelection | None:
+    """Resolve a built-in command to the handler key an adapter should use.
+
+    The handler key is deliberately canonical, not the typed alias. Adapters
+    remain responsible for invoking their local method or inline behavior for
+    that key.
+    """
+    resolved_surface = _coerce_surface(surface)
+    invocation = resolve_command_invocation(name=name, surface=resolved_surface)
+    if invocation is None or invocation.definition is None:
+        return None
+    if not _surface_allows_command(resolved_surface, invocation.definition):
+        return None
+    return CommandHandlerSelection(
+        invocation=invocation,
+        handler_key=invocation.canonical_name,
+    )
+
+
+def _has_command(container: Any, name: str) -> bool:
+    if not container:
+        return False
+    slash_name = f"/{name}"
+    try:
+        return name in container or slash_name in container
+    except TypeError:
+        return False
+
+
+def _lookup_mapping_command(
+    container: Mapping[str, Any] | None,
+    name: str,
+) -> tuple[str, Any] | None:
+    """Return the stored key/value for a command mapping.
+
+    User-authored config has historically used command names without a slash,
+    but accepting both ``foo`` and ``/foo`` keeps lookup behavior aligned with
+    plugin/skill containers.
+    """
+    if not isinstance(container, Mapping):
+        return None
+    raw_name = (name or "").lstrip("/")
+    for key in (raw_name, f"/{raw_name}"):
+        if key in container:
+            return key, container[key]
+    return None
+
+
+def _surface_lookup_name(surface: CommandSurface, name: str) -> str:
+    """Normalize non-built-in command names for a dispatch surface."""
+    raw_name = (name or "").lstrip("/")
+    if surface is CommandSurface.GATEWAY:
+        return raw_name.replace("_", "-")
+    return raw_name
+
+
+def resolve_command_dispatch(
+    text: str | None = None,
+    *,
+    name: str | None = None,
+    args: str = "",
+    surface: CommandSurface | str = CommandSurface.CLI,
+    quick_commands: Mapping[str, Any] | None = None,
+    plugin_commands: Any = None,
+    skill_bundles: Any = None,
+    skill_commands: Any = None,
+) -> SlashCommandDispatch:
+    """Classify slash-command dispatch for the common adapter fallback chain.
+
+    Built-ins always win over local quick commands. Built-ins that exist but
+    are gated away from the current surface return ``unavailable``. Unknown
+    commands then follow the shared local-substitution order: quick command,
+    plugin command, skill bundle, skill command, unknown.
+    """
+    resolved_surface = _coerce_surface(surface)
+    invocation = resolve_command_invocation(
+        text,
+        name=name,
+        args=args,
+        surface=resolved_surface,
+    )
+    if invocation is None:
+        invocation = SlashCommandInvocation(
+            raw_text=(text or "").strip(),
+            raw_name=(name or ""),
+            canonical_name=(name or ""),
+            args=args,
+            surface=resolved_surface,
+            definition=None,
+        )
+
+    selected = select_command_handler(resolved_surface, invocation.raw_name)
+    if selected is not None:
+        return SlashCommandDispatch(
+            invocation=selected.invocation,
+            route="builtin",
+            handler_key=selected.handler_key,
+        )
+    if invocation.definition is not None:
+        return SlashCommandDispatch(invocation, "unavailable", "unavailable")
+
+    raw_name = invocation.raw_name
+    quick_entry = _lookup_mapping_command(quick_commands, raw_name)
+    if quick_entry is not None:
+        quick_key, qcmd = quick_entry
+        qtype = qcmd.get("type") if isinstance(qcmd, Mapping) else None
+        if qtype == "alias":
+            target = (
+                str(qcmd.get("target", "")).strip()
+                if isinstance(qcmd, Mapping)
+                else ""
+            )
+            return SlashCommandDispatch(
+                invocation,
+                "quick_alias",
+                quick_key,
+                target=target or None,
+            )
+        if qtype == "exec":
+            return SlashCommandDispatch(invocation, "quick_exec", quick_key)
+        return SlashCommandDispatch(invocation, "quick_unsupported", quick_key)
+
+    plugin_name = _surface_lookup_name(resolved_surface, raw_name)
+    if _has_command(plugin_commands, plugin_name):
+        return SlashCommandDispatch(invocation, "plugin", plugin_name)
+
+    bundle_name = _surface_lookup_name(resolved_surface, raw_name)
+    if _has_command(skill_bundles, bundle_name):
+        return SlashCommandDispatch(invocation, "skill_bundle", bundle_name)
+
+    skill_name = _surface_lookup_name(resolved_surface, raw_name)
+    if _has_command(skill_commands, skill_name):
+        return SlashCommandDispatch(invocation, "skill", skill_name)
+
+    return SlashCommandDispatch(invocation, "unknown", "unknown")
+
+
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
     if cmd.args_hint:
@@ -318,10 +608,12 @@ def is_gateway_known_command(name: str | None) -> bool:
     """
     if not name:
         return False
-    if name in GATEWAY_KNOWN_COMMANDS:
+    clean_name = name.lower().lstrip("/")
+    candidates = {clean_name, clean_name.replace("_", "-")}
+    if candidates & GATEWAY_KNOWN_COMMANDS:
         return True
     for plugin_name, _description, _args_hint in _iter_plugin_command_entries():
-        if plugin_name == name:
+        if plugin_name in candidates:
             return True
     return False
 

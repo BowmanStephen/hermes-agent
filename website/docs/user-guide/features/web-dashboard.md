@@ -75,7 +75,8 @@ The **Chat** tab embeds the full Hermes TUI (the same interface you get from `he
 
 - `/api/pty` opens a WebSocket authenticated with the dashboard's session token
 - The server spawns `hermes --tui` behind a POSIX pseudo-terminal
-- Keystrokes travel to the PTY; ANSI output streams back to the browser
+- Keystrokes travel to the PTY; ANSI output streams back to the browser. The shared protocol code lives in `hermes_cli/dashboard_chat_transport.py` and the browser adapter in `web/src/lib/dashboardChatTransport.ts`
+- PTY-side TUI events publish to `/api/pub` and fan out to `/api/events` subscribers for the dashboard sidebar
 - xterm.js's WebGL renderer paints each cell to an integer-pixel grid; mouse tracking (SGR 1006), wide characters (Unicode 11), and box-drawing glyphs all render natively
 - Resizing the browser window resizes the TUI via the `@xterm/addon-fit` addon
 

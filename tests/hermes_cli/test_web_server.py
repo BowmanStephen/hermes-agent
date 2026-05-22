@@ -2129,6 +2129,16 @@ class TestPtyWebSocket:
                 pass
         assert exc.value.code == 4401
 
+    def test_events_rejects_bad_token(self):
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect(
+                "/api/events?token=wrong&channel=abc"
+            ):
+                pass
+        assert exc.value.code == 4401
+
     def test_rejects_bad_token(self, monkeypatch):
         monkeypatch.setattr(
             self.ws_module,
@@ -2310,12 +2320,14 @@ class TestPtyWebSocket:
         with self.client.websocket_connect(sub_path) as sub:
             # Wait for the subscriber to be registered on the server side.
             # websocket_connect returns when ws.accept() completes, but the
-            # server adds us to ``_event_channels`` in a follow-up await,
+            # transport adds us to its fanout registry in a follow-up await,
             # so a publish immediately after connect can race ahead of the
             # subscriber registration and the message is dropped.
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
-                if ws_mod._event_channels.get("broadcast-test"):
+                if ws_mod._chat_event_fanout.has_subscribers_nowait(
+                    "broadcast-test"
+                ):
                     break
                 time.sleep(0.01)
             else:
@@ -2324,11 +2336,47 @@ class TestPtyWebSocket:
                 )
 
             with self.client.websocket_connect(pub_path) as pub:
-                pub.send_text('{"type":"tool.start","payload":{"tool_id":"t1"}}')
+                pub.send_text(
+                    '{"jsonrpc":"2.0","method":"event",'
+                    '"params":{"type":"tool.start","payload":{"tool_id":"t1"}}}'
+                )
                 received = sub.receive_text()
 
         assert "tool.start" in received
         assert '"tool_id":"t1"' in received
+
+    def test_pub_drops_malformed_event_frames(self, monkeypatch):
+        import time
+        from urllib.parse import urlencode
+        from hermes_cli import web_server as ws_mod
+
+        qs = urlencode({"token": self.token, "channel": "typed-event-test"})
+        pub_path = f"/api/pub?{qs}"
+        sub_path = f"/api/events?{qs}"
+
+        with self.client.websocket_connect(sub_path) as sub:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if ws_mod._chat_event_fanout.has_subscribers_nowait(
+                    "typed-event-test"
+                ):
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError(
+                    "subscriber did not register on channel within 5s"
+                )
+
+            with self.client.websocket_connect(pub_path) as pub:
+                pub.send_text('{"type":"tool.start"}')
+                pub.send_text(
+                    '{"jsonrpc":"2.0","method":"event",'
+                    '"params":{"type":"tool.complete","payload":{"tool_id":"t1"}}}'
+                )
+                received = sub.receive_text()
+
+        assert "tool.complete" in received
+        assert '"type":"tool.start"' not in received
 
     def test_events_rejects_missing_channel(self):
         from starlette.websockets import WebSocketDisconnect

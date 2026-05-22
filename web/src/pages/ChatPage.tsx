@@ -24,7 +24,6 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@/components/NouiTypography";
-import { HERMES_BASE_PATH } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Copy, PanelRight, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,29 +34,13 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
+import {
+  buildChatPtyUrl,
+  createDashboardChatSession,
+  encodePtyResizeFrame,
+  isSgrMouseReport,
+} from "@/lib/dashboardChatTransport";
 import { PluginSlot } from "@/plugins";
-
-function buildWsUrl(
-  token: string,
-  resume: string | null,
-  channel: string,
-): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const qs = new URLSearchParams({ token, channel });
-  if (resume) qs.set("resume", resume);
-  return `${proto}//${window.location.host}${HERMES_BASE_PATH}/api/pty?${qs.toString()}`;
-}
-
-// Channel id ties this chat tab's PTY child (publisher) to its sidebar
-// (subscriber).  Generated once per mount so a tab refresh starts a fresh
-// channel — the previous PTY child terminates with the old WS, and its
-// channel auto-evicts when no subscribers remain.
-function generateChannelId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `chat-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
-}
 
 // Colors for the terminal body.  Matches the dashboard's dark teal canvas
 // with cream foreground — we intentionally don't pick monokai or a loud
@@ -156,7 +139,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // treat the current resume target as part of the PTY identity and rebuild the
   // terminal session when it changes.
   const resumeParam = searchParams.get("resume");
-  const channel = useMemo(() => generateChannelId(), [resumeParam]);
+  const chatSession = useMemo(
+    () => createDashboardChatSession({ resume: resumeParam }),
+    [resumeParam],
+  );
+  const channel = chatSession.channel;
 
   useEffect(() => {
     if (!resumeParam) return;
@@ -507,7 +494,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         wsRef.current &&
         wsRef.current.readyState === WebSocket.OPEN
       ) {
-        wsRef.current.send(`\x1b[RESIZE:${term.cols};${term.rows}]`);
+        wsRef.current.send(encodePtyResizeFrame(term.cols, term.rows));
       }
     };
     syncMetricsRef.current = syncTerminalMetrics;
@@ -545,7 +532,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     });
 
     // WebSocket
-    const url = buildWsUrl(token, resumeParam, channel);
+    const url = buildChatPtyUrl({
+      token,
+      resume: chatSession.resume,
+      channel: chatSession.channel,
+    });
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -560,7 +551,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // out against on its first paint.  The double-rAF block above will
       // follow up with the authoritative measurement — at worst Ink
       // reflows once after the PTY boots, which is imperceptible.
-      ws.send(`\x1b[RESIZE:${term.cols};${term.rows}]`);
+      ws.send(encodePtyResizeFrame(term.cols, term.rows));
     };
 
     ws.onmessage = (ev) => {
@@ -605,12 +596,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // mouse reporting, so we drop SGR mouse reports entirely instead of
     // forwarding them into Hermes. Keyboard input, paste, and resize still
     // behave normally.
-    // eslint-disable-next-line no-control-regex -- intentional ESC byte in xterm SGR mouse report parser
-    const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
     const onDataDisposable = term.onData((data) => {
       if (ws.readyState !== WebSocket.OPEN) return;
 
-      if (SGR_MOUSE_RE.test(data)) {
+      if (isSgrMouseReport(data)) {
         return;
       }
 
@@ -619,7 +608,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     const onResizeDisposable = term.onResize(({ cols, rows }) => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(`\x1b[RESIZE:${cols};${rows}]`);
+        ws.send(encodePtyResizeFrame(cols, rows));
       }
     });
 
@@ -650,7 +639,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         copyResetRef.current = null;
       }
     };
-  }, [channel, resumeParam]);
+  }, [chatSession]);
 
   // When the user returns to the chat tab (isActive: false → true), the
   // terminal host just transitioned from display:none to display:flex.

@@ -7,9 +7,10 @@ server itself.  To surface them in the dashboard sidebar (`/api/events`),
 the PTY-side gateway opens a back-WS to the dashboard at startup and
 mirrors every emit through this transport.
 
-Wire protocol: one JSON text frame per dispatcher event.  No JSON-RPC
-envelope here — the dashboard's ``/api/pub`` endpoint just rebroadcasts the
-frame verbatim to subscribers.
+Wire protocol: one JSON text frame per dispatcher event.  Frames use the same
+``{"jsonrpc":"2.0","method":"event","params":...}`` event envelope as the
+normal TUI transport.  The dashboard's ``/api/pub`` endpoint validates that
+shape, then rebroadcasts the raw frame to subscribers.
 
 Failure mode: silent.  The agent loop must never block waiting for the
 sidecar to drain.  A dead WS short-circuits all subsequent writes.

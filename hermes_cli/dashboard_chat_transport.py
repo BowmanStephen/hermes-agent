@@ -59,6 +59,8 @@ class DashboardEventFrame:
 
     raw: str
     event_type: str
+    session_id: str | None = None
+    payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +223,20 @@ def parse_event_frame(raw: str) -> DashboardEventFrame | None:
     if not isinstance(event_type, str) or not event_type:
         return None
 
-    return DashboardEventFrame(raw=raw, event_type=event_type)
+    session_id = params.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return None
+
+    payload = params.get("payload")
+    if payload is not None and not isinstance(payload, dict):
+        return None
+
+    return DashboardEventFrame(
+        raw=raw,
+        event_type=event_type,
+        session_id=session_id,
+        payload=payload,
+    )
 
 
 class PtyWebSocketTransport:

@@ -48,12 +48,28 @@ def test_parse_event_frame_accepts_dispatcher_event_envelope():
 
     frame = parse_event_frame(raw)
 
-    assert frame == DashboardEventFrame(raw=raw, event_type="tool.start")
+    assert frame == DashboardEventFrame(
+        raw=raw,
+        event_type="tool.start",
+        session_id="s1",
+        payload={"tool_id": "t1"},
+    )
 
 
 def test_parse_event_frame_rejects_non_event_json():
     assert parse_event_frame('{"type":"tool.start"}') is None
     assert parse_event_frame("not-json") is None
+
+
+def test_parse_event_frame_rejects_malformed_typed_fields():
+    assert parse_event_frame(
+        '{"jsonrpc":"2.0","method":"event",'
+        '"params":{"type":"tool.start","session_id":123,"payload":{}}}'
+    ) is None
+    assert parse_event_frame(
+        '{"jsonrpc":"2.0","method":"event",'
+        '"params":{"type":"tool.start","payload":"bad"}}'
+    ) is None
 
 
 def test_build_chat_session_resolves_resume_and_sidecar_together():

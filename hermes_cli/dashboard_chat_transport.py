@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import re
 import urllib.parse
@@ -58,6 +59,50 @@ class DashboardEventFrame:
 
     raw: str
     event_type: str
+
+
+@dataclass(frozen=True)
+class DashboardWebSocketGateResult:
+    """Decision for a dashboard chat WebSocket upgrade."""
+
+    accepted: bool
+    close_code: int | None = None
+    channel: str | None = None
+
+
+@dataclass(frozen=True)
+class DashboardWebSocketGate:
+    """Shared auth, client, and channel policy for dashboard chat adapters."""
+
+    enabled: bool
+    expected_token: str
+    public_bind: bool = False
+    loopback_hosts: frozenset[str] = frozenset(
+        {"127.0.0.1", "::1", "localhost", "testclient"}
+    )
+
+    def validate(
+        self,
+        *,
+        token: str,
+        client_host: str | None,
+        channel: str | None = None,
+        require_channel: bool = False,
+    ) -> DashboardWebSocketGateResult:
+        if not self.enabled:
+            return DashboardWebSocketGateResult(False, close_code=4403)
+
+        if not hmac.compare_digest(token.encode(), self.expected_token.encode()):
+            return DashboardWebSocketGateResult(False, close_code=4401)
+
+        if not self.public_bind and client_host and client_host not in self.loopback_hosts:
+            return DashboardWebSocketGateResult(False, close_code=4403)
+
+        valid_channel = channel if channel and is_valid_channel(channel) else None
+        if require_channel and not valid_channel:
+            return DashboardWebSocketGateResult(False, close_code=4400)
+
+        return DashboardWebSocketGateResult(True, channel=valid_channel)
 
 
 class PtyPort(Protocol):

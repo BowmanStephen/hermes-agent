@@ -3270,10 +3270,10 @@ async def get_models_analytics(days: int = 30):
 
 from hermes_cli.dashboard_chat_transport import (
     ChatEventFanout,
+    DashboardWebSocketGate,
     DEFAULT_PTY_READ_TIMEOUT,
     PtyWebSocketTransport,
     build_chat_session,
-    is_valid_channel,
     parse_event_frame,
 )
 
@@ -3303,18 +3303,13 @@ def _is_public_bind() -> bool:
     return getattr(app.state, "bound_host", "") in {"0.0.0.0", "::"}
 
 
-def _ws_client_is_allowed(ws: "WebSocket") -> bool:
-    """Check if the WebSocket client IP is acceptable.
-
-    Allows loopback always; allows any IP when bound to all-interfaces
-    (--insecure mode, guarded by session token auth).
-    """
-    if _is_public_bind():
-        return True
-    client_host = ws.client.host if ws.client else ""
-    if not client_host:
-        return True
-    return client_host in _LOOPBACK_HOSTS
+def _dashboard_chat_ws_gate() -> DashboardWebSocketGate:
+    return DashboardWebSocketGate(
+        enabled=_DASHBOARD_EMBEDDED_CHAT_ENABLED,
+        expected_token=_SESSION_TOKEN,
+        public_bind=_is_public_bind(),
+        loopback_hosts=_LOOPBACK_HOSTS,
+    )
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -3391,40 +3386,26 @@ async def _broadcast_event(channel: str, payload: str) -> None:
     await _chat_event_fanout.broadcast(channel, payload)
 
 
-def _channel_or_close_code(ws: WebSocket) -> Optional[str]:
-    """Return the channel id from the query string or None if invalid."""
-    channel = ws.query_params.get("channel", "")
-
-    return channel if is_valid_channel(channel) else None
-
-
 async def _accept_dashboard_chat_ws(
     ws: WebSocket,
     *,
     require_channel: bool = False,
 ) -> tuple[bool, Optional[str]]:
     """Apply dashboard chat WS gates, accept, and return the optional channel."""
-    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
-        return False, None
-
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
-        return False, None
-
-    if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
-        return False, None
-
-    channel = _channel_or_close_code(ws)
-    if require_channel and not channel:
-        await ws.close(code=4400)
+    client_host = ws.client.host if ws.client else ""
+    decision = _dashboard_chat_ws_gate().validate(
+        token=ws.query_params.get("token", ""),
+        client_host=client_host,
+        channel=ws.query_params.get("channel", ""),
+        require_channel=require_channel,
+    )
+    if not decision.accepted:
+        await ws.close(code=decision.close_code or 4403)
         return False, None
 
     await ws.accept()
 
-    return True, channel
+    return True, decision.channel
 
 
 @app.websocket("/api/pty")
@@ -4504,7 +4485,7 @@ def start_server(
             )
 
     print(f"  Hermes Web UI → http://{host}:{port}")
-    # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
+    # proxy_headers=False so the dashboard chat WebSocket gate sees the real peer
     # rather than X-Forwarded-For's rewritten value (which would defeat the
     # loopback gate when behind a reverse proxy).
     uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)

@@ -8,6 +8,8 @@ from hermes_cli.dashboard_chat_transport import (
     ChatEventFanout,
     DashboardChatSession,
     DashboardEventFrame,
+    DashboardWebSocketGate,
+    DashboardWebSocketGateResult,
     PtyInput,
     PtyResize,
     PtyWebSocketTransport,
@@ -87,6 +89,50 @@ def test_build_chat_session_drops_invalid_channel_but_keeps_resume():
         resume="sess-42",
         channel=None,
         sidecar_url=None,
+    )
+
+
+def test_dashboard_ws_gate_rejects_disabled_bad_token_and_bad_channel():
+    gate = DashboardWebSocketGate(enabled=False, expected_token="tok")
+
+    assert gate.validate(token="tok", client_host="127.0.0.1") == (
+        DashboardWebSocketGateResult(False, close_code=4403)
+    )
+
+    gate = DashboardWebSocketGate(enabled=True, expected_token="tok")
+
+    assert gate.validate(token="wrong", client_host="127.0.0.1") == (
+        DashboardWebSocketGateResult(False, close_code=4401)
+    )
+    assert gate.validate(
+        token="tok",
+        client_host="127.0.0.1",
+        channel="../bad",
+        require_channel=True,
+    ) == DashboardWebSocketGateResult(False, close_code=4400)
+
+
+def test_dashboard_ws_gate_allows_loopback_and_public_bind_clients():
+    loopback_gate = DashboardWebSocketGate(enabled=True, expected_token="tok")
+
+    assert loopback_gate.validate(
+        token="tok",
+        client_host="localhost",
+        channel="tab-1",
+        require_channel=True,
+    ) == DashboardWebSocketGateResult(True, channel="tab-1")
+    assert loopback_gate.validate(token="tok", client_host="203.0.113.7") == (
+        DashboardWebSocketGateResult(False, close_code=4403)
+    )
+
+    public_gate = DashboardWebSocketGate(
+        enabled=True,
+        expected_token="tok",
+        public_bind=True,
+    )
+
+    assert public_gate.validate(token="tok", client_host="203.0.113.7") == (
+        DashboardWebSocketGateResult(True)
     )
 
 

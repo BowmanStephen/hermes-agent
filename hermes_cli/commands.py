@@ -536,6 +536,77 @@ def resolve_command_dispatch(
     return SlashCommandDispatch(invocation, "unknown", "unknown")
 
 
+def _provider_value(
+    provider: Callable[[], Any] | None,
+    default_provider: Callable[[], Any],
+) -> Any:
+    if provider is None:
+        return default_provider()
+    try:
+        return provider()
+    except Exception:
+        return default_provider()
+
+
+def _default_plugin_commands() -> set[str]:
+    try:
+        from hermes_cli.plugins import get_plugin_commands
+        return set((get_plugin_commands() or {}).keys())
+    except Exception:
+        return set()
+
+
+def _default_skill_bundles() -> Mapping[str, Any]:
+    try:
+        from agent.skill_bundles import get_skill_bundles
+        bundles = get_skill_bundles()
+        return bundles if isinstance(bundles, Mapping) else {}
+    except Exception:
+        return {}
+
+
+def _default_skill_commands() -> Mapping[str, Any]:
+    try:
+        from agent.skill_commands import get_skill_commands
+        commands = get_skill_commands()
+        return commands if isinstance(commands, Mapping) else {}
+    except Exception:
+        return {}
+
+
+def resolve_command_dispatch_with_sources(
+    text: str | None = None,
+    *,
+    name: str | None = None,
+    args: str = "",
+    surface: CommandSurface | str = CommandSurface.CLI,
+    quick_commands: Mapping[str, Any] | None = None,
+    plugin_commands_provider: Callable[[], Any] | None = None,
+    skill_bundles_provider: Callable[[], Any] | None = None,
+    skill_commands_provider: Callable[[], Any] | None = None,
+) -> SlashCommandDispatch:
+    """Resolve dispatch using live plugin/skill sources behind the seam."""
+    return resolve_command_dispatch(
+        text,
+        name=name,
+        args=args,
+        surface=surface,
+        quick_commands=quick_commands,
+        plugin_commands=_provider_value(
+            plugin_commands_provider,
+            _default_plugin_commands,
+        ),
+        skill_bundles=_provider_value(
+            skill_bundles_provider,
+            _default_skill_bundles,
+        ),
+        skill_commands=_provider_value(
+            skill_commands_provider,
+            _default_skill_commands,
+        ),
+    )
+
+
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
     if cmd.args_hint:

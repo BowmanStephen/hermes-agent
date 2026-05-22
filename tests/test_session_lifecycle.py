@@ -127,6 +127,34 @@ def test_branch_session_rejects_missing_parent(tmp_path):
         db.close()
 
 
+def test_branch_session_rejects_existing_child_id(tmp_path):
+    from hermes_state import SessionDB
+    from session_lifecycle import SessionAlreadyExists, branch_session
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("parent", "cli")
+        db.create_session("branch", "cli")
+
+        try:
+            branch_session(
+                db,
+                parent_session_id="parent",
+                history=[{"role": "user", "content": "hello"}],
+                source="cli",
+                new_session_id="branch",
+            )
+        except SessionAlreadyExists as exc:
+            assert str(exc) == "branch"
+        else:
+            raise AssertionError("expected existing child id to fail")
+
+        assert db.get_session("parent")["end_reason"] is None
+        assert db.get_messages_as_conversation("branch") == []
+    finally:
+        db.close()
+
+
 def test_split_session_for_compression_preserves_lineage_title_and_prompt(tmp_path):
     from hermes_state import SessionDB
     from session_lifecycle import split_session_for_compression
@@ -154,6 +182,36 @@ def test_split_session_for_compression_preserves_lineage_title_and_prompt(tmp_pa
         assert new_row["parent_session_id"] == "old"
         assert new_row["system_prompt"] == "new prompt"
         assert db.get_session_title("new") == "Planning #2"
+    finally:
+        db.close()
+
+
+def test_split_session_for_compression_rejects_existing_child_id(tmp_path):
+    from hermes_state import SessionDB
+    from session_lifecycle import SessionAlreadyExists, split_session_for_compression
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("old", "cli", model="test-model")
+        db.create_session("new", "cli", model="test-model")
+
+        try:
+            split_session_for_compression(
+                db,
+                old_session_id="old",
+                source="cli",
+                model="test-model",
+                model_config={},
+                system_prompt="new prompt",
+                new_session_id="new",
+            )
+        except SessionAlreadyExists as exc:
+            assert str(exc) == "new"
+        else:
+            raise AssertionError("expected existing child id to fail")
+
+        assert db.get_session("old")["end_reason"] is None
+        assert db.get_session("new")["parent_session_id"] is None
     finally:
         db.close()
 

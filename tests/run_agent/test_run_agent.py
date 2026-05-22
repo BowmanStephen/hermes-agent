@@ -2175,6 +2175,44 @@ class TestConcurrentToolExecution:
         assert len(messages) == 2
         assert stops == ["⚡ 2/2 tools completed in 0.0s total"]
 
+    def test_concurrent_spinner_summary_counts_only_runnable_tools(self, agent, monkeypatch):
+        """Blocked calls in a concurrent batch should not inflate execution summary."""
+        tc1 = _mock_tool_call(name="web_search", arguments='{"query":"blocked"}', call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments='{"query":"allowed"}', call_id="c2")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        starts = []
+        stops = []
+
+        class FakeSpinner:
+            @staticmethod
+            def get_waiting_faces():
+                return ["^_^"]
+
+            def __init__(self, message, *args, **kwargs):
+                starts.append(message)
+
+            def start(self):
+                pass
+
+            def stop(self, message):
+                stops.append(message)
+
+        monkeypatch.setattr("agent.tool_executor.KawaiiSpinner", FakeSpinner)
+        monkeypatch.setattr(agent, "_should_emit_quiet_tool_messages", lambda: True)
+        monkeypatch.setattr(agent, "_should_start_quiet_spinner", lambda: True)
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            lambda _name, args, **_kwargs: "Blocked" if args.get("query") == "blocked" else None,
+        )
+
+        with patch("run_agent.handle_function_call", return_value='{"ok": true}'):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        assert len(messages) == 2
+        assert starts == ["^_^ ⚡ running 1 tools concurrently"]
+        assert stops == ["⚡ 1/1 tools completed in 0.0s total"]
+
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")

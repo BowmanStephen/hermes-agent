@@ -107,6 +107,28 @@ class TestSlashCommandPrefixMatching:
         unknown = any("Unknown command" in p for p in printed)
         assert not unknown, f"Expected skill prefix to match, got: {printed}"
 
+    def test_plugin_command_prefix_matches(self, monkeypatch):
+        """A prefix that uniquely matches a plugin command should dispatch it."""
+        cli_obj = _make_cli()
+        from hermes_cli import plugins as plugins_mod
+
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_commands",
+            lambda: {"plugin-cmd": {"description": "Plugin command"}},
+        )
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_command_handler",
+            lambda name: (lambda args: f"plugin:{args}") if name == "plugin-cmd" else None,
+        )
+
+        with patch("cli._cprint") as mock_cprint:
+            cli_obj.process_command("/plugin-c hello")
+
+        printed = " ".join(str(c) for c in mock_cprint.call_args_list)
+        assert "plugin:hello" in printed
+
     def test_ambiguous_between_builtin_and_skill(self):
         """Ambiguous prefix spanning builtin + skill commands shows suggestions."""
         cli_obj = _make_cli()

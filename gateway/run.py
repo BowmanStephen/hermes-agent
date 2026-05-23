@@ -4114,9 +4114,10 @@ class GatewayRunner:
 
         1. Atomically claims it (pending → running).
         2. Resolves the destination platform's configured home channel.
-        3. Re-binds the gateway's session_key for that home channel to the
-           CLI's existing session_id via ``session_store.switch_session`` so
-           the full role-aware transcript replays on the next agent turn.
+        3. Activates the CLI session row through ``session_lifecycle`` and
+           re-binds the gateway's session_key for that home channel via
+           ``session_store.switch_session`` so the full role-aware transcript
+           replays on the next agent turn.
         4. Forges a synthetic ``MessageEvent`` (``internal=True``) with a
            handoff-notice text and dispatches through the normal gateway
            message pipeline so the agent runs and replies on the platform.
@@ -4255,12 +4256,18 @@ class GatewayRunner:
         # Make sure there's an entry in the session_store for this key. If
         # the home channel has never been used, get_or_create_session
         # creates one; switch_session then re-points it.
-        self.session_store.get_or_create_session(dest_source)
+        dest_entry = self.session_store.get_or_create_session(dest_source)
 
-        # Re-bind the destination key to the CLI session_id. switch_session
-        # ends the prior session in SQLite and reopens the CLI session under
-        # the new key. The CLI's transcript becomes the active one for the
-        # gateway from this moment on.
+        # Re-bind the destination key to the CLI session_id. SQLite lifecycle
+        # state is owned by session_lifecycle; SessionStore only persists the
+        # destination session_key → session_id mapping.
+        from session_lifecycle import activate_session
+        activate_session(
+            self._session_db,
+            cli_session_id,
+            current_session_id=dest_entry.session_id,
+            end_current_reason="session_switch",
+        )
         switched = self.session_store.switch_session(session_key, cli_session_id)
         if switched is None:
             raise RuntimeError(
@@ -7054,28 +7061,46 @@ class GatewayRunner:
         command = event.get_command()
 
         from hermes_cli.commands import (
-            GATEWAY_KNOWN_COMMANDS,
+            CommandSurface,
             is_gateway_known_command,
-            resolve_command as _resolve_cmd,
+            resolve_command_dispatch,
+            resolve_command_dispatch_with_sources,
+            resolve_command_invocation,
+            resolve_plugin_command_dispatch,
+            select_command_handler,
         )
 
-        # Resolve aliases to canonical name so dispatch and hook names
-        # don't depend on the exact alias the user typed.
-        _cmd_def = _resolve_cmd(command) if command else None
-        canonical = _cmd_def.name if _cmd_def else command
+        # Resolve aliases to canonical handler keys through the shared seam so
+        # dispatch, hooks, and access checks do not depend on the typed alias.
+        _cmd_invocation = (
+            resolve_command_invocation(
+                name=command,
+                args=event.get_command_args().strip(),
+                surface=CommandSurface.GATEWAY,
+            )
+            if command
+            else None
+        )
+        canonical = _cmd_invocation.canonical_name if _cmd_invocation else command
 
         # Expand alias quick commands before built-in dispatch so targets like
         # /model openai/gpt-5.5 --provider openrouter reach the /model handler.
         # Preserve built-in precedence; aliases only need early handling when
         # the typed command is not already known.
-        if command and _cmd_def is None:
+        if command and select_command_handler(CommandSurface.GATEWAY, command) is None:
             if isinstance(self.config, dict):
                 quick_commands = self.config.get("quick_commands", {}) or {}
             else:
                 quick_commands = getattr(self.config, "quick_commands", {}) or {}
-            if isinstance(quick_commands, dict) and command in quick_commands:
-                qcmd = quick_commands[command]
-                if qcmd.get("type") == "alias":
+            if isinstance(quick_commands, dict):
+                alias_dispatch = resolve_command_dispatch(
+                    name=command,
+                    args=event.get_command_args().strip(),
+                    surface=CommandSurface.GATEWAY,
+                    quick_commands=quick_commands,
+                )
+                qcmd = quick_commands.get(alias_dispatch.handler_key, {})
+                if alias_dispatch.route == "quick_alias":
                     target = qcmd.get("target", "").strip()
                     if target:
                         target = target if target.startswith("/") else f"/{target}"
@@ -7083,8 +7108,20 @@ class GatewayRunner:
                         user_args = event.get_command_args().strip()
                         event.text = f"{target} {user_args}".strip()
                         command = target_command.split()[0] if target_command else target_command
-                        _cmd_def = _resolve_cmd(command) if command else None
-                        canonical = _cmd_def.name if _cmd_def else command
+                        _cmd_invocation = (
+                            resolve_command_invocation(
+                                name=command,
+                                args=user_args,
+                                surface=CommandSurface.GATEWAY,
+                            )
+                            if command
+                            else None
+                        )
+                        canonical = (
+                            _cmd_invocation.canonical_name
+                            if _cmd_invocation
+                            else command
+                        )
 
         # Per-platform slash command access control. Only kicks in when the
         # operator has set ``allow_admin_from`` for the source's scope (DM
@@ -7092,6 +7129,15 @@ class GatewayRunner:
         # run every command. When set → non-admins can run only commands in
         # ``user_allowed_commands`` (plus the always-allowed floor: /help,
         # /whoami). Plain chat is unaffected — only slash commands gate.
+        if command:
+            _hook_dispatch = resolve_plugin_command_dispatch(
+                name=command,
+                args=event.get_command_args().strip(),
+                surface=CommandSurface.GATEWAY,
+            )
+            if _hook_dispatch.route == "plugin":
+                canonical = _hook_dispatch.handler_key
+
         if command and canonical and is_gateway_known_command(canonical):
             _denied = self._check_slash_access(source, canonical)
             if _denied is not None:
@@ -7148,8 +7194,28 @@ class GatewayRunner:
                     new_args = str(hook_result.get("raw_args", "")).strip()
                     event.text = f"/{new_command} {new_args}".strip()
                     command = event.get_command()
-                    _cmd_def = _resolve_cmd(command) if command else None
-                    canonical = _cmd_def.name if _cmd_def else command
+                    _cmd_invocation = (
+                        resolve_command_invocation(
+                            name=command,
+                            args=new_args,
+                            surface=CommandSurface.GATEWAY,
+                        )
+                        if command
+                        else None
+                    )
+                    canonical = (
+                        _cmd_invocation.canonical_name
+                        if _cmd_invocation
+                        else command
+                    )
+                    if command:
+                        _hook_dispatch = resolve_plugin_command_dispatch(
+                            name=command,
+                            args=new_args,
+                            surface=CommandSurface.GATEWAY,
+                        )
+                        if _hook_dispatch.route == "plugin":
+                            canonical = _hook_dispatch.handler_key
                     break
 
         if canonical == "new":
@@ -7168,66 +7234,51 @@ class GatewayRunner:
                 execute=_do_reset,
             )
 
-        if canonical == "topic":
-            return await self._handle_topic_command(event)
-        
-        if canonical == "help":
-            return await self._handle_help_command(event)
+        gateway_handlers = {
+            "topic": self._handle_topic_command,
+            "help": self._handle_help_command,
+            "commands": self._handle_commands_command,
+            "profile": self._handle_profile_command,
+            "whoami": self._handle_whoami_command,
+            "status": self._handle_status_command,
+            "agents": self._handle_agents_command,
+            "platform": self._handle_platform_command,
+            "restart": self._handle_restart_command,
+            "stop": self._handle_stop_command,
+            "reasoning": self._handle_reasoning_command,
+            "fast": self._handle_fast_command,
+            "verbose": self._handle_verbose_command,
+            "footer": self._handle_footer_command,
+            "yolo": self._handle_yolo_command,
+            "model": self._handle_model_command,
+            "codex-runtime": self._handle_codex_runtime_command,
+            "personality": self._handle_personality_command,
+            "kanban": self._handle_kanban_command,
+            "retry": self._handle_retry_command,
+            "sethome": self._handle_set_home_command,
+            "compress": self._handle_compress_command,
+            "usage": self._handle_usage_command,
+            "insights": self._handle_insights_command,
+            "reload-mcp": self._handle_reload_mcp_command,
+            "reload-skills": self._handle_reload_skills_command,
+            "bundles": self._handle_bundles_command,
+            "approve": self._handle_approve_command,
+            "deny": self._handle_deny_command,
+            "update": self._handle_update_command,
+            "debug": self._handle_debug_command,
+            "title": self._handle_title_command,
+            "resume": self._handle_resume_command,
+            "branch": self._handle_branch_command,
+            "rollback": self._handle_rollback_command,
+            "background": self._handle_background_command,
+            "goal": self._handle_goal_command,
+            "subgoal": self._handle_subgoal_command,
+            "voice": self._handle_voice_command,
+        }
+        gateway_handler = gateway_handlers.get(canonical)
+        if gateway_handler is not None:
+            return await gateway_handler(event)
 
-        if canonical == "commands":
-            return await self._handle_commands_command(event)
-        
-        if canonical == "profile":
-            return await self._handle_profile_command(event)
-
-        if canonical == "whoami":
-            return await self._handle_whoami_command(event)
-
-        if canonical == "status":
-            return await self._handle_status_command(event)
-
-        if canonical == "agents":
-            return await self._handle_agents_command(event)
-
-        if canonical == "platform":
-            return await self._handle_platform_command(event)
-
-        if canonical == "restart":
-            return await self._handle_restart_command(event)
-        
-        if canonical == "stop":
-            return await self._handle_stop_command(event)
-        
-        if canonical == "reasoning":
-            return await self._handle_reasoning_command(event)
-
-        if canonical == "fast":
-            return await self._handle_fast_command(event)
-
-        if canonical == "verbose":
-            return await self._handle_verbose_command(event)
-
-        if canonical == "footer":
-            return await self._handle_footer_command(event)
-
-        if canonical == "yolo":
-            return await self._handle_yolo_command(event)
-
-        if canonical == "model":
-            return await self._handle_model_command(event)
-
-        if canonical == "codex-runtime":
-            return await self._handle_codex_runtime_command(event)
-
-        if canonical == "personality":
-            return await self._handle_personality_command(event)
-
-        if canonical == "kanban":
-            return await self._handle_kanban_command(event)
-
-        if canonical == "retry":
-            return await self._handle_retry_command(event)
-        
         if canonical == "undo":
             async def _do_undo():
                 return await self._handle_undo_command(event)
@@ -7238,54 +7289,6 @@ class GatewayRunner:
                 detail="This removes the last user/assistant exchange from history.",
                 execute=_do_undo,
             )
-        
-        if canonical == "sethome":
-            return await self._handle_set_home_command(event)
-
-        if canonical == "compress":
-            return await self._handle_compress_command(event)
-
-        if canonical == "usage":
-            return await self._handle_usage_command(event)
-
-        if canonical == "insights":
-            return await self._handle_insights_command(event)
-
-        if canonical == "reload-mcp":
-            return await self._handle_reload_mcp_command(event)
-
-        if canonical == "reload-skills":
-            return await self._handle_reload_skills_command(event)
-
-        if canonical == "bundles":
-            return await self._handle_bundles_command(event)
-
-        if canonical == "approve":
-            return await self._handle_approve_command(event)
-
-        if canonical == "deny":
-            return await self._handle_deny_command(event)
-
-        if canonical == "update":
-            return await self._handle_update_command(event)
-
-        if canonical == "debug":
-            return await self._handle_debug_command(event)
-
-        if canonical == "title":
-            return await self._handle_title_command(event)
-
-        if canonical == "resume":
-            return await self._handle_resume_command(event)
-
-        if canonical == "branch":
-            return await self._handle_branch_command(event)
-
-        if canonical == "rollback":
-            return await self._handle_rollback_command(event)
-
-        if canonical == "background":
-            return await self._handle_background_command(event)
 
         if canonical == "steer":
             # No active agent — /steer has no tool call to inject into.
@@ -7293,7 +7296,10 @@ class GatewayRunner:
             # message. If the payload is empty, surface the usage hint.
             steer_payload = event.get_command_args().strip()
             if not steer_payload:
-                return "Usage: /steer <prompt>  (no agent is running; sending as a normal message)"
+                return (
+                    "Usage: /steer <prompt>  "
+                    "(no agent is running; sending as a normal message)"
+                )
             try:
                 event.text = steer_payload
             except Exception:
@@ -7302,19 +7308,11 @@ class GatewayRunner:
             # at the end of this function so the rewritten text is sent
             # to the agent as a regular user turn.
 
-        if canonical == "goal":
-            return await self._handle_goal_command(event)
-
-        if canonical == "subgoal":
-            return await self._handle_subgoal_command(event)
-
-        if canonical == "voice":
-            return await self._handle_voice_command(event)
-
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
 
-        # User-defined quick commands (bypass agent loop, no LLM call)
+        quick_commands = {}
+        skill_cmds = {}
         if command:
             if isinstance(self.config, dict):
                 quick_commands = self.config.get("quick_commands", {}) or {}
@@ -7322,58 +7320,102 @@ class GatewayRunner:
                 quick_commands = getattr(self.config, "quick_commands", {}) or {}
             if not isinstance(quick_commands, dict):
                 quick_commands = {}
-            if command in quick_commands:
-                qcmd = quick_commands[command]
-                if qcmd.get("type") == "exec":
-                    exec_cmd = qcmd.get("command", "")
-                    if exec_cmd:
+            try:
+                from agent.skill_commands import get_skill_commands
+                skill_cmds = get_skill_commands()
+            except Exception:
+                skill_cmds = {}
+            command_dispatch = resolve_command_dispatch_with_sources(
+                name=command,
+                args=event.get_command_args().strip(),
+                surface=CommandSurface.GATEWAY,
+                quick_commands=quick_commands,
+                skill_commands_provider=lambda: skill_cmds,
+            )
+        else:
+            command_dispatch = None
+
+        if command:
+            if command_dispatch and command_dispatch.route == "quick_exec":
+                qcmd = quick_commands.get(command_dispatch.handler_key, {})
+                exec_cmd = qcmd.get("command", "")
+                if exec_cmd:
+                    try:
+                        # Sanitize env to prevent credential leakage —
+                        # quick commands run in the gateway process which
+                        # has all API keys in os.environ.
+                        from tools.environments.local import _sanitize_subprocess_env
+
+                        sanitized_env = _sanitize_subprocess_env(os.environ.copy())
+                        proc = await asyncio.create_subprocess_shell(
+                            exec_cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            env=sanitized_env,
+                        )
+                        communicate_task = asyncio.create_task(proc.communicate())
                         try:
-                            # Sanitize env to prevent credential leakage —
-                            # quick commands run in the gateway process which
-                            # has all API keys in os.environ.
-                            from tools.environments.local import _sanitize_subprocess_env
-                            sanitized_env = _sanitize_subprocess_env(os.environ.copy())
-                            proc = await asyncio.create_subprocess_shell(
-                                exec_cmd,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                                env=sanitized_env,
+                            stdout, stderr = await asyncio.wait_for(
+                                communicate_task,
+                                timeout=30,
                             )
-                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                            output = (stdout or stderr).decode().strip()
-                            # Redact any remaining sensitive patterns in output
-                            if output:
-                                from agent.redact import redact_sensitive_text
-                                output = redact_sensitive_text(output)
-                            return output if output else "Command returned no output."
                         except asyncio.TimeoutError:
+                            communicate_task.cancel()
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                            try:
+                                await proc.wait()
+                            except Exception:
+                                pass
                             return "Quick command timed out (30s)."
-                        except Exception as e:
-                            return f"Quick command error: {e}"
-                    else:
-                        return f"Quick command '/{command}' has no command defined."
-                elif qcmd.get("type") == "alias":
-                    target = qcmd.get("target", "").strip()
-                    if target:
-                        target = target if target.startswith("/") else f"/{target}"
-                        target_command = target.lstrip("/")
-                        user_args = event.get_command_args().strip()
-                        event.text = f"{target} {user_args}".strip()
-                        command = target_command.split()[0] if target_command else target_command
-                        # Fall through to normal command dispatch below
-                    else:
-                        return f"Quick command '/{command}' has no target defined."
+                        output = (stdout or stderr).decode().strip()
+                        # Redact any remaining sensitive patterns in output
+                        if output:
+                            from agent.redact import redact_sensitive_text
+                            output = redact_sensitive_text(output)
+                        return output if output else "Command returned no output."
+                    except Exception as e:
+                        return f"Quick command error: {e}"
+                return f"Quick command '/{command}' has no command defined."
+            if command_dispatch and command_dispatch.route == "quick_alias":
+                target = (command_dispatch.target or "").strip()
+                if target:
+                    target = target if target.startswith("/") else f"/{target}"
+                    target_command = target.lstrip("/")
+                    user_args = event.get_command_args().strip()
+                    event.text = f"{target} {user_args}".strip()
+                    command = (
+                        target_command.split()[0]
+                        if target_command
+                        else target_command
+                    )
+                    command_dispatch = resolve_command_dispatch_with_sources(
+                        name=command,
+                        args=user_args,
+                        surface=CommandSurface.GATEWAY,
+                        skill_commands_provider=lambda: skill_cmds,
+                    )
                 else:
-                    return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias')."
+                    return f"Quick command '/{command}' has no target defined."
+            elif command_dispatch and command_dispatch.route == "quick_unsupported":
+                return (
+                    f"Quick command '/{command}' has unsupported type "
+                    "(supported: 'exec', 'alias')."
+                )
+            elif command_dispatch and command_dispatch.route == "unavailable":
+                return (
+                    f"Command `/{command_dispatch.invocation.canonical_name}` "
+                    "isn't available from this gateway surface. "
+                    "Type /commands to see what's available here."
+                )
 
         # Plugin-registered slash commands
-        if command:
+        if command and command_dispatch and command_dispatch.route == "plugin":
             try:
                 from hermes_cli.plugins import get_plugin_command_handler
-                # Normalize underscores to hyphens so Telegram's underscored
-                # autocomplete form matches plugin commands registered with
-                # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
-                plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
+                plugin_handler = get_plugin_command_handler(command_dispatch.handler_key)
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
                     result = plugin_handler(user_args)
@@ -7387,16 +7429,15 @@ class GatewayRunner:
         # resolve_skill_command_key() handles the Telegram underscore/hyphen
         # round-trip so /claude_code from Telegram autocomplete still resolves
         # to the claude-code skill.
-        if command:
+        if command and command_dispatch and command_dispatch.route == "skill_bundle":
             # Skill bundles take precedence over individual skill commands —
             # /<bundle> loads multiple skills at once. Mirrors CLI dispatch.
             _bundle_handled = False
             try:
                 from agent.skill_bundles import (
                     build_bundle_invocation_message,
-                    resolve_bundle_command_key,
                 )
-                bundle_key = resolve_bundle_command_key(command)
+                bundle_key = command_dispatch.handler_slash_key
                 if bundle_key is not None:
                     user_instruction = event.get_command_args().strip()
                     bundle_result = build_bundle_invocation_message(
@@ -7411,19 +7452,27 @@ class GatewayRunner:
                                 "Bundle %s skipped missing skills: %s",
                                 bundle_key, ", ".join(missing),
                             )
-                        # Fall through to normal message processing with bundle content
+                        # Fall through to normal message processing with bundle
+                        # content.
             except Exception as exc:
                 logger.debug("Bundle dispatch failed (non-fatal): %s", exc)
 
-        if command and not locals().get("_bundle_handled", False):
+        if (
+            command
+            and command_dispatch
+            and command_dispatch.route in {"skill", "unknown"}
+            and not locals().get("_bundle_handled", False)
+        ):
             try:
                 from agent.skill_commands import (
-                    get_skill_commands,
                     build_skill_invocation_message,
                     resolve_skill_command_key,
                 )
-                skill_cmds = get_skill_commands()
-                cmd_key = resolve_skill_command_key(command)
+                cmd_key = (
+                    command_dispatch.handler_slash_key
+                    if command_dispatch.route == "skill"
+                    else resolve_skill_command_key(command)
+                )
                 if cmd_key is not None:
                     # Check per-platform disabled status before executing.
                     # get_skill_commands() only applies the *global* disabled
@@ -7459,7 +7508,7 @@ class GatewayRunner:
                     # Normalize to hyphenated form before checking known
                     # built-ins (command may be an alias target set by the
                     # quick-command block above, so _cmd_def can be stale).
-                    if command.replace("_", "-") not in GATEWAY_KNOWN_COMMANDS:
+                    if not is_gateway_known_command(command.replace("_", "-")):
                         logger.warning(
                             "Unrecognized slash command /%s from %s — "
                             "replying with unknown-command notice",
@@ -7862,14 +7911,25 @@ class GatewayRunner:
             if binding:
                 bound_session_id = str(binding.get("session_id") or "")
                 if bound_session_id and bound_session_id != session_entry.session_id:
-                    # Route the override through SessionStore so the session_key
-                    # → session_id mapping is persisted to disk and the previous
-                    # lane session is ended cleanly. Mutating session_entry in
-                    # place here created a split-brain state where the JSON
+                    # Route the override through session_lifecycle + SessionStore:
+                    # lifecycle owns SQLite invariants, and SessionStore persists
+                    # the session_key → session_id mapping. Mutating session_entry
+                    # in place here created a split-brain state where the JSON
                     # index pointed at one id but code downstream used another.
-                    switched = self.session_store.switch_session(session_key, bound_session_id)
-                    if switched is not None:
-                        session_entry = switched
+                    try:
+                        from session_lifecycle import activate_session
+                        activate_session(
+                            self._session_db,
+                            bound_session_id,
+                            current_session_id=session_entry.session_id,
+                            end_current_reason="session_switch",
+                        )
+                    except Exception:
+                        logger.debug("Failed to activate Telegram topic session", exc_info=True)
+                    else:
+                        switched = self.session_store.switch_session(session_key, bound_session_id)
+                        if switched is not None:
+                            session_entry = switched
             else:
                 try:
                     self._record_telegram_topic_binding(source, session_entry)
@@ -12583,15 +12643,21 @@ class GatewayRunner:
         target_id = self._session_db.resolve_session_by_title(name)
         if not target_id:
             return t("gateway.resume.not_found", name=name)
-        # Compression creates child continuations that hold the live transcript.
-        # Follow that chain so gateway /resume matches CLI behavior (#15000).
+
+        current_entry = self.session_store.get_or_create_session(source)
         try:
-            target_id = self._session_db.resolve_resume_session_id(target_id)
-        except Exception as e:
-            logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
+            from session_lifecycle import SessionNotFound, resume_session
+            resume = resume_session(
+                self._session_db,
+                target_id,
+                current_session_id=current_entry.session_id,
+                end_current_reason="session_switch",
+            )
+        except SessionNotFound:
+            return t("gateway.resume.not_found", name=name)
+        target_id = resume.session_id
 
         # Check if already on that session
-        current_entry = self.session_store.get_or_create_session(source)
         if current_entry.session_id == target_id:
             return t("gateway.resume.already_on", name=name)
 
@@ -12612,11 +12678,8 @@ class GatewayRunner:
         self._evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = self._session_db.get_session_title(target_id) or name
-
-        # Count messages for context
-        history = self.session_store.load_transcript(target_id)
-        msg_count = len([m for m in history if m.get("role") == "user"]) if history else 0
+        title = resume.title or name
+        msg_count = resume.user_message_count
         if not msg_count:
             return t("gateway.resume.resumed_no_count", title=title)
         if msg_count == 1:
@@ -12630,8 +12693,6 @@ class GatewayRunner:
         a different approach without losing the original.
         Inspired by Claude Code's /branch command.
         """
-        import uuid as _uuid
-
         if not self._session_db:
             from hermes_state import format_session_db_unavailable
             return format_session_db_unavailable(prefix=t("gateway.shared.session_db_unavailable_prefix"))
@@ -12646,64 +12707,24 @@ class GatewayRunner:
             return t("gateway.branch.no_conversation")
 
         branch_name = event.get_command_args().strip()
-
-        # Generate the new session ID
-        from datetime import datetime as _dt
-        now = _dt.now()
-        timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-        short_uuid = _uuid.uuid4().hex[:6]
-        new_session_id = f"{timestamp_str}_{short_uuid}"
-
-        # Determine branch title
-        if branch_name:
-            branch_title = branch_name
-        else:
-            current_title = self._session_db.get_session_title(current_entry.session_id)
-            base = current_title or "branch"
-            branch_title = self._session_db.get_next_title_in_lineage(base)
-
         parent_session_id = current_entry.session_id
 
-        # Create the new session with parent link
         try:
-            self._session_db.create_session(
-                session_id=new_session_id,
+            from session_lifecycle import branch_session
+            branch = branch_session(
+                self._session_db,
+                parent_session_id=parent_session_id,
+                history=history,
+                branch_title=branch_name or None,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
-                parent_session_id=parent_session_id,
             )
         except Exception as e:
             logger.error("Failed to create branch session: %s", e)
             return t("gateway.branch.create_failed", error=e)
 
-        # Copy conversation history to the new session
-        for msg in history:
-            try:
-                self._session_db.append_message(
-                    session_id=new_session_id,
-                    role=msg.get("role", "user"),
-                    content=msg.get("content"),
-                    tool_name=msg.get("tool_name") or msg.get("name"),
-                    tool_calls=msg.get("tool_calls"),
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning"),
-                    reasoning_content=msg.get("reasoning_content"),
-                    reasoning_details=msg.get("reasoning_details"),
-                    codex_reasoning_items=msg.get("codex_reasoning_items"),
-                    codex_message_items=msg.get("codex_message_items"),
-                )
-            except Exception:
-                pass  # Best-effort copy
-
-        # Set title
-        try:
-            self._session_db.set_session_title(new_session_id, branch_title)
-        except Exception:
-            pass
-
         # Switch the session store entry to the new session
-        new_entry = self.session_store.switch_session(session_key, new_session_id)
+        new_entry = self.session_store.switch_session(session_key, branch.session_id)
         if not new_entry:
             return t("gateway.branch.switch_failed")
         self._clear_session_boundary_security_state(session_key)
@@ -12711,9 +12732,8 @@ class GatewayRunner:
         # Evict any cached agent for this session
         self._evict_cached_agent(session_key)
 
-        msg_count = len([m for m in history if m.get("role") == "user"])
-        key = "gateway.branch.branched_one" if msg_count == 1 else "gateway.branch.branched_many"
-        return t(key, title=branch_title, count=msg_count, parent=parent_session_id, new=new_session_id)
+        key = "gateway.branch.branched_one" if branch.user_message_count == 1 else "gateway.branch.branched_many"
+        return t(key, title=branch.title, count=branch.user_message_count, parent=parent_session_id, new=branch.session_id)
 
     async def _handle_usage_command(self, event: MessageEvent) -> str:
         """Handle /usage command -- show token usage for the current session.

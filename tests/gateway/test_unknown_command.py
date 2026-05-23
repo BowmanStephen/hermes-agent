@@ -79,6 +79,17 @@ def _make_runner():
     return runner
 
 
+def _stub_agent_fallthrough(runner, result="agent ok"):
+    """Install the minimal agent path needed after skill/bundle rewrite."""
+    runner._running_agents_ts = {}
+    runner._begin_session_run_generation = MagicMock(return_value=1)
+    runner._handle_message_with_agent = AsyncMock(return_value=result)
+    runner._post_turn_goal_continuation = AsyncMock()
+    runner._release_running_agent_state = MagicMock(
+        side_effect=lambda key: runner._running_agents.pop(key, None)
+    )
+
+
 @pytest.mark.asyncio
 async def test_unknown_slash_command_returns_guidance(monkeypatch):
     """A genuinely unknown /foobar should return user-facing guidance, not
@@ -168,6 +179,30 @@ async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch)
     # Whatever /reload_mcp returns, it must not be the unknown-command guard.
     if result is not None:
         assert "Unknown command" not in result
+
+
+@pytest.mark.asyncio
+async def test_known_but_gateway_unavailable_command_returns_surface_guidance(monkeypatch):
+    """A CLI-only built-in must not leak to the LLM as plain text."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError(
+            "gateway-unavailable slash command leaked through to the agent"
+        )
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("/config"))
+
+    assert result is not None
+    assert "isn't available" in result
+    assert "/config" in result
+    runner._run_agent.assert_not_called()
 
 
 # ------------------------------------------------------------------
@@ -324,6 +359,46 @@ async def test_command_hook_fires_for_plugin_registered_command(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_command_hook_normalizes_telegram_plugin_command(monkeypatch):
+    """Telegram's underscored plugin command form should hook with the plugin key."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("plugin command leaked to the agent")
+    )
+    runner.hooks.emit_collect = AsyncMock(
+        return_value=[{"decision": "handled", "message": "intercepted"}]
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    from hermes_cli import plugins as _plugins_mod
+
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_commands",
+        lambda: {
+            "my-plugin-cmd": {
+                "description": "Plugin command",
+                "args_hint": "",
+            }
+        },
+    )
+
+    result = await runner._handle_message(_make_event("/my_plugin_cmd hello"))
+
+    assert result == "intercepted"
+    call_args = runner.hooks.emit_collect.await_args
+    assert call_args.args[0] == "command:my-plugin-cmd"
+    ctx = call_args.args[1]
+    assert ctx["command"] == "my-plugin-cmd"
+    assert ctx["raw_command"] == "my_plugin_cmd"
+    assert ctx["raw_args"] == "hello"
+
+
+@pytest.mark.asyncio
 async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     """A rewrite decision should re-resolve the command and route to the new one."""
     import gateway.run as gateway_run
@@ -371,3 +446,132 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+@pytest.mark.asyncio
+async def test_quick_alias_routes_to_plugin_command(monkeypatch):
+    """A quick-command alias target should reach plugin dispatch after rewrite."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner.config.quick_commands = {
+        "metrics": {"type": "alias", "target": "/metricas"}
+    }
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("quick alias plugin command leaked to the agent")
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    from hermes_cli import plugins as _plugins_mod
+
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_commands",
+        lambda: {"metricas": {"description": "Metrics", "args_hint": "dias:7"}},
+    )
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: (lambda args: f"metrics {args}") if name == "metricas" else None,
+    )
+
+    result = await runner._handle_message(_make_event("/metrics dias:7"))
+
+    assert result == "metrics dias:7"
+    runner._run_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_quick_alias_routes_to_builtin_command(monkeypatch):
+    """A quick-command alias target should reach built-in dispatch."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner.config.quick_commands = {"s": {"type": "alias", "target": "/status"}}
+    runner._handle_status_command = AsyncMock(return_value="status ok")
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("quick alias built-in command leaked to the agent")
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("/s"))
+
+    assert result == "status ok"
+    runner._handle_status_command.assert_awaited_once()
+    runner._run_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_quick_alias_routes_to_skill_command(monkeypatch):
+    """A quick-command alias target should load a skill before agent dispatch."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    _stub_agent_fallthrough(runner)
+    runner.config.quick_commands = {
+        "dev": {"type": "alias", "target": "/hermes-agent-dev"}
+    }
+    fake_skills = {
+        "/hermes-agent-dev": {
+            "name": "Hermes Agent Dev",
+            "description": "Dev workflow",
+        }
+    }
+    fake_msg = "Loaded skill content"
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    from agent import skill_commands as _skill_commands
+
+    monkeypatch.setattr(_skill_commands, "get_skill_commands", lambda: fake_skills)
+    monkeypatch.setattr(
+        _skill_commands,
+        "build_skill_invocation_message",
+        lambda *_a, **_kw: fake_msg,
+    )
+
+    event = _make_event("/dev check dispatch")
+    result = await runner._handle_message(event)
+
+    assert result == "agent ok"
+    assert event.text == fake_msg
+    runner._handle_message_with_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_quick_alias_routes_to_skill_bundle(monkeypatch):
+    """A quick-command alias target should load a skill bundle before dispatch."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    _stub_agent_fallthrough(runner)
+    runner.config.quick_commands = {
+        "backend": {"type": "alias", "target": "/backend-dev"}
+    }
+    fake_bundles = {"/backend-dev": {"name": "Backend Dev"}}
+    fake_msg = "Loaded bundle content"
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    from agent import skill_bundles as _skill_bundles
+
+    monkeypatch.setattr(_skill_bundles, "get_skill_bundles", lambda: fake_bundles)
+    monkeypatch.setattr(
+        _skill_bundles,
+        "build_bundle_invocation_message",
+        lambda *_a, **_kw: (fake_msg, [], []),
+    )
+
+    event = _make_event("/backend review")
+    result = await runner._handle_message(event)
+
+    assert result == "agent ok"
+    assert event.text == fake_msg
+    runner._handle_message_with_agent.assert_awaited_once()

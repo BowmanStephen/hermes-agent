@@ -7,9 +7,10 @@ server itself.  To surface them in the dashboard sidebar (`/api/events`),
 the PTY-side gateway opens a back-WS to the dashboard at startup and
 mirrors every emit through this transport.
 
-Wire protocol: newline-framed JSON dicts (the same shape the dispatcher
-already passes to ``write``).  No JSON-RPC envelope here — the dashboard's
-``/api/pub`` endpoint just rebroadcasts the bytes verbatim to subscribers.
+Wire protocol: one JSON text frame per dispatcher event.  Frames use the same
+``{"jsonrpc":"2.0","method":"event","params":...}`` event envelope as the
+normal TUI transport.  The dashboard's ``/api/pub`` endpoint validates that
+shape, then rebroadcasts the raw frame to subscribers.
 
 Failure mode: silent.  The agent loop must never block waiting for the
 sidecar to drain.  A dead WS short-circuits all subsequent writes.
@@ -19,11 +20,12 @@ Actual ``send`` calls run on a daemon thread so the TeeTransport's
 
 from __future__ import annotations
 
-import json
 import logging
 import queue
 import threading
 from typing import Optional
+
+from hermes_cli.dashboard_chat_transport import encode_event_frame
 
 try:
     from websockets.sync.client import connect as ws_connect
@@ -91,7 +93,7 @@ class WsPublisherTransport:
         if self._dead or self._ws is None or self._worker is None:
             return False
 
-        line = json.dumps(obj, ensure_ascii=False)
+        line = encode_event_frame(obj)
 
         try:
             self._q.put_nowait(line)

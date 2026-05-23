@@ -81,73 +81,17 @@ except Exception:
 import threading
 import queue
 
-def CanonicalUsage(*args, **kwargs):
-    from agent.usage_pricing import CanonicalUsage as _CanonicalUsage
-
-    return _CanonicalUsage(*args, **kwargs)
-
-
-def estimate_usage_cost(*args, **kwargs):
-    from agent.usage_pricing import estimate_usage_cost as _estimate_usage_cost
-
-    return _estimate_usage_cost(*args, **kwargs)
-
-
-def format_duration_compact(*args, **kwargs):
-    seconds = float(args[0] if args else kwargs.get("seconds", 0.0))
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{minutes:.0f}m"
-    hours = minutes / 60
-    if hours < 24:
-        remaining_min = int(minutes % 60)
-        return f"{int(hours)}h {remaining_min}m" if remaining_min else f"{int(hours)}h"
-    days = hours / 24
-    return f"{days:.1f}d"
-
-
-def format_token_count_compact(*args, **kwargs):
-    value = int(args[0] if args else kwargs.get("value", 0))
-    abs_value = abs(value)
-    if abs_value < 1_000:
-        return str(value)
-
-    sign = "-" if value < 0 else ""
-    units = ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K"))
-    for threshold, suffix in units:
-        if abs_value >= threshold:
-            scaled = abs_value / threshold
-            if scaled < 10:
-                text = f"{scaled:.2f}"
-            elif scaled < 100:
-                text = f"{scaled:.1f}"
-            else:
-                text = f"{scaled:.0f}"
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            return f"{sign}{text}{suffix}"
-
-    return f"{value:,}"
-
-
-def is_table_divider(*args, **kwargs):
-    from agent.markdown_tables import is_table_divider as _is_table_divider
-
-    return _is_table_divider(*args, **kwargs)
-
-
-def looks_like_table_row(*args, **kwargs):
-    from agent.markdown_tables import looks_like_table_row as _looks_like_table_row
-
-    return _looks_like_table_row(*args, **kwargs)
-
-
-def realign_markdown_tables(*args, **kwargs):
-    from agent.markdown_tables import realign_markdown_tables as _realign_markdown_tables
-
-    return _realign_markdown_tables(*args, **kwargs)
+from agent.usage_pricing import (
+    CanonicalUsage,
+    estimate_usage_cost,
+    format_duration_compact,
+    format_token_count_compact,
+)
+from agent.markdown_tables import (
+    is_table_divider,
+    looks_like_table_row,
+    realign_markdown_tables,
+)
 # NOTE: `from agent.account_usage import ...` is deliberately NOT at module
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
@@ -775,135 +719,29 @@ from rich.text import Text as _RichText
 
 import fire
 
-# Import agent and tool systems lazily. Bare interactive startup only needs the
-# prompt; the full agent/tool registry is initialized on first use.
-def AIAgent(*args, **kwargs):
-    from run_agent import AIAgent as _AIAgent
-
-    return _AIAgent(*args, **kwargs)
-
-
-def get_tool_definitions(*args, **kwargs):
-    from model_tools import get_tool_definitions as _get_tool_definitions
-
-    return _get_tool_definitions(*args, **kwargs)
-
-
-def get_toolset_for_tool(*args, **kwargs):
-    from model_tools import get_toolset_for_tool as _get_toolset_for_tool
-
-    return _get_toolset_for_tool(*args, **kwargs)
+# Import the agent and tool systems
+from run_agent import AIAgent
+from model_tools import get_tool_definitions, get_toolset_for_tool
 
 # Extracted CLI modules (Phase 3)
 from hermes_cli.banner import build_welcome_banner
 from hermes_cli.commands import SlashCommandCompleter, SlashCommandAutoSuggest
-
-
-def get_all_toolsets(*args, **kwargs):
-    from toolsets import get_all_toolsets as _get_all_toolsets
-
-    return _get_all_toolsets(*args, **kwargs)
-
-
-def get_toolset_info(*args, **kwargs):
-    from toolsets import get_toolset_info as _get_toolset_info
-
-    return _get_toolset_info(*args, **kwargs)
-
-
-def validate_toolset(*args, **kwargs):
-    from toolsets import validate_toolset as _validate_toolset
-
-    return _validate_toolset(*args, **kwargs)
+from toolsets import get_all_toolsets, get_toolset_info, validate_toolset
 
 # Cron job system for scheduled tasks (execution is handled by the gateway)
-def get_job(*args, **kwargs):
-    from cron import get_job as _get_job
-
-    return _get_job(*args, **kwargs)
+from cron import get_job
 
 # Resource cleanup imports for safe shutdown (terminal VMs, browser sessions)
+from tools.terminal_tool import cleanup_all_environments as _cleanup_all_terminals
+from tools.terminal_tool import set_sudo_password_callback, set_approval_callback
+from tools.skills_tool import set_secret_capture_callback
 from hermes_cli.callbacks import prompt_for_secret
-
-
-def _cleanup_all_terminals(*args, **kwargs):
-    from tools.terminal_tool import cleanup_all_environments
-
-    return cleanup_all_environments(*args, **kwargs)
-
-
-def set_sudo_password_callback(*args, **kwargs):
-    from tools.terminal_tool import set_sudo_password_callback as _set_sudo_password_callback
-
-    return _set_sudo_password_callback(*args, **kwargs)
-
-
-def set_approval_callback(*args, **kwargs):
-    from tools.terminal_tool import set_approval_callback as _set_approval_callback
-
-    return _set_approval_callback(*args, **kwargs)
-
-
-def set_secret_capture_callback(*args, **kwargs):
-    from tools.skills_tool import set_secret_capture_callback as _set_secret_capture_callback
-
-    return _set_secret_capture_callback(*args, **kwargs)
-
-
-def _cleanup_all_browsers(*args, **kwargs):
-    from tools.browser_tool import _emergency_cleanup_all_sessions
-
-    return _emergency_cleanup_all_sessions(*args, **kwargs)
+from tools.browser_tool import _emergency_cleanup_all_sessions as _cleanup_all_browsers
 
 # Guard to prevent cleanup from running multiple times on exit
 _cleanup_done = False
 # Weak reference to the active AIAgent for memory provider shutdown at exit
 _active_agent_ref = None
-_deferred_agent_startup_done = False
-
-
-def _prepare_deferred_agent_startup() -> None:
-    """Run Termux-deferred agent discovery before the first real agent turn."""
-    global _deferred_agent_startup_done
-    if _deferred_agent_startup_done:
-        return
-    if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
-        return
-    _deferred_agent_startup_done = True
-    _accept_hooks = os.environ.get("HERMES_ACCEPT_HOOKS", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    try:
-        from hermes_cli.plugins import discover_plugins
-
-        discover_plugins()
-    except Exception:
-        logger.warning(
-            "plugin discovery failed at deferred CLI startup",
-            exc_info=True,
-        )
-    try:
-        from tools.mcp_tool import discover_mcp_tools
-
-        discover_mcp_tools()
-    except Exception:
-        logger.debug(
-            "MCP tool discovery failed at deferred CLI startup",
-            exc_info=True,
-        )
-    try:
-        from agent.shell_hooks import register_from_config
-        from hermes_cli.config import load_config
-
-        register_from_config(load_config(), accept_hooks=_accept_hooks)
-    except Exception:
-        logger.debug(
-            "shell-hook registration failed at deferred CLI startup",
-            exc_info=True,
-        )
 
 def _run_cleanup():
     """Run resource cleanup exactly once."""
@@ -2617,13 +2455,7 @@ def _build_compact_banner() -> str:
         line1 = f"{agent_name} - AI Agent Framework"
         tiny_line = agent_name
 
-    if os.environ.get("HERMES_FAST_STARTUP_BANNER") == "1":
-        from hermes_cli import __release_date__ as _release_date
-        from hermes_cli import __version__ as _version
-
-        version_line = f"Hermes Agent v{_version} ({_release_date})"
-    else:
-        version_line = format_banner_version_label()
+    version_line = format_banner_version_label()
 
     w = min(shutil.get_terminal_size().columns - 2, 88)
     if w < 30:
@@ -2672,57 +2504,19 @@ def _looks_like_slash_command(text: str) -> bool:
 # Skill Slash Commands — dynamic commands generated from installed skills
 # ============================================================================
 
-_skill_commands = None
-_skill_bundles = None
+from agent.skill_commands import (
+    scan_skill_commands,
+    get_skill_commands,
+    build_skill_invocation_message,
+    build_preloaded_skills_prompt,
+)
+from agent.skill_bundles import (
+    get_skill_bundles,
+    build_bundle_invocation_message,
+)
 
-
-def _ensure_skill_commands() -> dict:
-    global _skill_commands
-    if _skill_commands is None:
-        from agent.skill_commands import scan_skill_commands
-
-        _skill_commands = scan_skill_commands()
-    return _skill_commands
-
-
-def get_skill_commands() -> dict:
-    return _ensure_skill_commands()
-
-
-def build_skill_invocation_message(*args, **kwargs):
-    from agent.skill_commands import build_skill_invocation_message as _impl
-
-    return _impl(*args, **kwargs)
-
-
-def build_preloaded_skills_prompt(*args, **kwargs):
-    from agent.skill_commands import build_preloaded_skills_prompt as _impl
-
-    return _impl(*args, **kwargs)
-
-
-def get_skill_bundles() -> dict:
-    global _skill_bundles
-    if _skill_bundles is None:
-        from agent.skill_bundles import get_skill_bundles as _impl
-
-        _skill_bundles = _impl()
-    return _skill_bundles
-
-
-def build_bundle_invocation_message(*args, **kwargs):
-    from agent.skill_bundles import build_bundle_invocation_message as _impl
-
-    return _impl(*args, **kwargs)
-
-
-def _get_plugin_cmd_handler_names() -> set:
-    """Return plugin command names (without slash prefix) for dispatch matching."""
-    try:
-        from hermes_cli.plugins import get_plugin_commands
-        return set(get_plugin_commands().keys())
-    except Exception:
-        return set()
+_skill_commands = scan_skill_commands()
+_skill_bundles = get_skill_bundles()
 
 
 def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> list[str]:
@@ -3062,9 +2856,7 @@ class HermesCLI:
         self._active_agent_route_signature = None
 
         # Agent will be initialized on first use
-        self.agent: Optional[Any] = None
-        self._tool_callbacks_installed = False
-        self._tirith_security_checked = False
+        self.agent: Optional[AIAgent] = None
         self._app = None  # prompt_toolkit Application (set in run())
         
         # Conversation state
@@ -4687,41 +4479,6 @@ class HermesCLI:
         route["request_overrides"] = overrides
         return route
 
-    def _install_tool_callbacks(self) -> None:
-        """Install tool callbacks that need the live prompt UI."""
-        if getattr(self, "_tool_callbacks_installed", False):
-            return
-        set_sudo_password_callback(self._sudo_password_callback)
-        set_approval_callback(self._approval_callback)
-        set_secret_capture_callback(self._secret_capture_callback)
-        try:
-            from tools.computer_use_tool import set_approval_callback as _set_cu_cb
-
-            _set_cu_cb(self._computer_use_approval_callback)
-        except ImportError:
-            pass
-        self._tool_callbacks_installed = True
-
-    def _ensure_tirith_security(self) -> None:
-        """Check tirith availability once before tools can run terminal commands."""
-        if getattr(self, "_tirith_security_checked", False):
-            return
-        self._tirith_security_checked = True
-        try:
-            from tools.tirith_security import ensure_installed, is_platform_supported
-
-            tirith_path = ensure_installed(log_failures=False)
-            if tirith_path is None and is_platform_supported():
-                security_cfg = self.config.get("security", {}) or {}
-                tirith_enabled = security_cfg.get("tirith_enabled", True)
-                if tirith_enabled:
-                    _cprint(
-                        f"  {_DIM}⚠ tirith security scanner enabled but not available "
-                        f"— command scanning will use pattern matching only{_RST}"
-                    )
-        except Exception:
-            pass
-
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:
         """
         Initialize the agent on first use.
@@ -4732,10 +4489,6 @@ class HermesCLI:
         """
         if self.agent is not None:
             return True
-
-        _prepare_deferred_agent_startup()
-        self._install_tool_callbacks()
-        self._ensure_tirith_security()
 
         if not self._ensure_runtime_credentials():
             return False
@@ -4753,36 +4506,27 @@ class HermesCLI:
         # run() for immediate display).  In that case, conversation_history
         # is non-empty and we skip the DB round-trip.
         if self._resumed and self._session_db and not self.conversation_history:
-            session_meta = self._session_db.get_session(self.session_id)
-            if not session_meta:
+            try:
+                from session_lifecycle import SessionNotFound, resume_session
+                resume = resume_session(self._session_db, self.session_id)
+            except SessionNotFound:
                 _cprint(f"\033[1;31mSession not found: {self.session_id}{_RST}")
                 _cprint(f"{_DIM}Use a session ID from a previous CLI run (hermes sessions list).{_RST}")
                 return False
-            # If the requested session is the (empty) head of a compression
-            # chain, walk to the descendant that actually holds the messages.
-            # See #15000 and SessionDB.resolve_resume_session_id.
-            try:
-                resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
-            except Exception:
-                resolved_id = self.session_id
-            if resolved_id and resolved_id != self.session_id:
+            if resume.resolved_from_session_id:
                 ChatConsole().print(
-                    f"[{_DIM}]Session {_escape(self.session_id)} was compressed into "
-                    f"{_escape(resolved_id)}; resuming the descendant with your "
+                    f"[{_DIM}]Session {_escape(resume.resolved_from_session_id)} was compressed into "
+                    f"{_escape(resume.session_id)}; resuming the descendant with your "
                     f"transcript.[/]"
                 )
-                self.session_id = resolved_id
-                resolved_meta = self._session_db.get_session(self.session_id)
-                if resolved_meta:
-                    session_meta = resolved_meta
-            restored = self._session_db.get_messages_as_conversation(self.session_id)
+            self.session_id = resume.session_id
+            restored = resume.messages
             if restored:
-                restored = [m for m in restored if m.get("role") != "session_meta"]
                 self.conversation_history = restored
-                msg_count = len([m for m in restored if m.get("role") == "user"])
+                msg_count = resume.user_message_count
                 title_part = ""
-                if session_meta.get("title"):
-                    title_part = f" \"{session_meta['title']}\""
+                if resume.title:
+                    title_part = f" \"{resume.title}\""
                 ChatConsole().print(
                     f"[bold {_accent_hex()}]↻ Resumed session[/] "
                     f"[bold]{_escape(self.session_id)}[/]"
@@ -4793,15 +4537,6 @@ class HermesCLI:
                 ChatConsole().print(
                     f"[bold {_accent_hex()}]Session {_escape(self.session_id)} found but has no messages. Starting fresh.[/]"
                 )
-            # Re-open the session (clear ended_at so it's active again)
-            try:
-                self._session_db._conn.execute(
-                    "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
-                    (self.session_id,),
-                )
-                self._session_db._conn.commit()
-            except Exception:
-                pass
         
         try:
             runtime = runtime_override or {
@@ -4951,10 +4686,8 @@ class HermesCLI:
                 context_length=ctx_len,
             )
         
-        # Tool discovery is intentionally deferred on the Termux bare prompt
-        # path; availability warnings are shown once tools are initialized.
-        if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
-            self._show_tool_availability_warnings()
+        # Show tool availability warnings if any tools are disabled
+        self._show_tool_availability_warnings()
 
         # Warn about very low context lengths (common with local servers)
         if ctx_len and ctx_len <= 8192:
@@ -5014,8 +4747,10 @@ class HermesCLI:
         if not self._resumed or not self._session_db:
             return False
 
-        session_meta = self._session_db.get_session(self.session_id)
-        if not session_meta:
+        try:
+            from session_lifecycle import SessionNotFound, resume_session
+            resume = resume_session(self._session_db, self.session_id)
+        except SessionNotFound:
             self._console_print(
                 f"[bold red]Session not found: {self.session_id}[/]"
             )
@@ -5025,30 +4760,20 @@ class HermesCLI:
             )
             return False
 
-        # If the requested session is the (empty) head of a compression chain,
-        # walk to the descendant that actually holds the messages. See #15000.
-        try:
-            resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
-        except Exception:
-            resolved_id = self.session_id
-        if resolved_id and resolved_id != self.session_id:
+        if resume.resolved_from_session_id:
             self._console_print(
-                f"[dim]Session {self.session_id} was compressed into "
-                f"{resolved_id}; resuming the descendant with your transcript.[/]"
+                f"[dim]Session {resume.resolved_from_session_id} was compressed into "
+                f"{resume.session_id}; resuming the descendant with your transcript.[/]"
             )
-            self.session_id = resolved_id
-            resolved_meta = self._session_db.get_session(self.session_id)
-            if resolved_meta:
-                session_meta = resolved_meta
+        self.session_id = resume.session_id
 
-        restored = self._session_db.get_messages_as_conversation(self.session_id)
+        restored = resume.messages
         if restored:
-            restored = [m for m in restored if m.get("role") != "session_meta"]
             self.conversation_history = restored
-            msg_count = len([m for m in restored if m.get("role") == "user"])
+            msg_count = resume.user_message_count
             title_part = ""
-            if session_meta.get("title"):
-                title_part = f' "{session_meta["title"]}"'
+            if resume.title:
+                title_part = f' "{resume.title}"'
             accent_color = _accent_hex()
             self._console_print(
                 f"[{accent_color}]↻ Resumed session [bold]{self.session_id}[/bold]"
@@ -5063,17 +4788,6 @@ class HermesCLI:
                 f"messages. Starting fresh.[/]"
             )
             return False
-
-        # Re-open the session (clear ended_at so it's active again)
-        try:
-            self._session_db._conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL "
-                "WHERE id = ?",
-                (self.session_id,),
-            )
-            self._session_db._conn.commit()
-        except Exception:
-            pass
 
         return True
 
@@ -5731,13 +5445,9 @@ class HermesCLI:
     
     def _show_status(self):
         """Show compact startup status line."""
-        # Avoid pulling the full tool registry into the bare Termux prompt path.
-        if os.environ.get("HERMES_DEFER_AGENT_STARTUP") == "1":
-            tool_status = "tools deferred"
-        else:
-            tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
-            tool_count = len(tools) if tools else 0
-            tool_status = f"{tool_count} tools"
+        # Get tool count
+        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+        tool_count = len(tools) if tools else 0
 
         # Format model name (shorten if needed)
         model_short = self.model.split("/")[-1] if "/" in self.model else self.model
@@ -5769,7 +5479,7 @@ class HermesCLI:
 
         self._console_print(
             f"  {api_indicator} [{accent_color}]{model_short}[/] "
-            f"[dim {separator_color}]·[/] [bold {label_color}]{tool_status}[/]"
+            f"[dim {separator_color}]·[/] [bold {label_color}]{tool_count} tools[/]"
             f"{toolsets_info}{provider_info}"
         )
 
@@ -5882,10 +5592,9 @@ class HermesCLI:
                     continue
                 ChatConsole().print(f"    [bold {_accent_hex()}]{cmd:<15}[/] [dim]-[/] {_escape(desc)}")
 
-        skill_commands = _ensure_skill_commands()
-        if skill_commands:
-            _cprint(f"\n  ⚡ {_BOLD}Skill Commands{_RST} ({len(skill_commands)} installed):")
-            for cmd, info in sorted(skill_commands.items()):
+        if _skill_commands:
+            _cprint(f"\n  ⚡ {_BOLD}Skill Commands{_RST} ({len(_skill_commands)} installed):")
+            for cmd, info in sorted(_skill_commands.items()):
                 ChatConsole().print(
                     f"    [bold {_accent_hex()}]{cmd:<22}[/] [dim]-[/] {_escape(info['description'])}"
                 )
@@ -6531,54 +6240,38 @@ class HermesCLI:
         resolved = _resolve_session_by_name_or_id(target)
         target_id = resolved or target
 
-        session_meta = self._session_db.get_session(target_id)
-        if not session_meta:
+        try:
+            from session_lifecycle import SessionNotFound, resume_session
+            resume = resume_session(
+                self._session_db,
+                target_id,
+                current_session_id=self.session_id,
+                end_current_reason="resumed_other",
+            )
+        except SessionNotFound:
             _cprint(f"  Session not found: {target}")
             _cprint("  Use /history or `hermes sessions list` to see available sessions.")
             return
 
-        # If the target is the empty head of a compression chain, redirect to
-        # the descendant that actually holds the transcript. See #15000.
-        try:
-            resolved_id = self._session_db.resolve_resume_session_id(target_id)
-        except Exception:
-            resolved_id = target_id
-        if resolved_id and resolved_id != target_id:
+        if resume.resolved_from_session_id:
             _cprint(
-                f"  Session {target_id} was compressed into {resolved_id}; "
+                f"  Session {resume.resolved_from_session_id} was compressed into {resume.session_id}; "
                 f"resuming the descendant with your transcript."
             )
-            target_id = resolved_id
-            resolved_meta = self._session_db.get_session(target_id)
-            if resolved_meta:
-                session_meta = resolved_meta
+        target_id = resume.session_id
 
         if target_id == self.session_id:
             _cprint("  Already on that session.")
             return
 
         old_session_id = self.session_id
-        # End current session
-        try:
-            self._session_db.end_session(self.session_id, "resumed_other")
-        except Exception:
-            pass
 
         # Switch to the target session
         self.session_id = target_id
         self._resumed = True
         self._pending_title = None
 
-        # Load conversation history (strip transcript-only metadata entries)
-        restored = self._session_db.get_messages_as_conversation(target_id)
-        restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
-        self.conversation_history = restored
-
-        # Re-open the target session so it's not marked as ended
-        try:
-            self._session_db.reopen_session(target_id)
-        except Exception:
-            pass
+        self.conversation_history = resume.messages
 
         # Sync the agent if already initialised
         if self.agent:
@@ -6611,8 +6304,8 @@ class HermesCLI:
             except Exception:
                 pass
 
-        title_part = f" \"{session_meta['title']}\"" if session_meta.get("title") else ""
-        msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
+        title_part = f" \"{resume.title}\"" if resume.title else ""
+        msg_count = resume.user_message_count
         if self.conversation_history:
             _cprint(
                 f"  ↻ Resumed session {target_id}{title_part}"
@@ -6673,78 +6366,35 @@ class HermesCLI:
         parts = cmd_original.split(None, 1)
         branch_name = parts[1].strip() if len(parts) > 1 else ""
 
-        # Generate the new session ID
-        now = datetime.now()
-        timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-        short_uuid = uuid.uuid4().hex[:6]
-        new_session_id = f"{timestamp_str}_{short_uuid}"
-
-        # Determine branch title
-        if branch_name:
-            branch_title = branch_name
-        else:
-            # Auto-generate from the current session title
-            current_title = None
-            if self._session_db:
-                current_title = self._session_db.get_session_title(self.session_id)
-            base = current_title or "branch"
-            branch_title = self._session_db.get_next_title_in_lineage(base)
-
-        # Save the current session's state before branching
         parent_session_id = self.session_id
-
-        # End the old session
+        now = datetime.now()
         try:
-            self._session_db.end_session(self.session_id, "branched")
-        except Exception:
-            pass
-
-        # Create the new session with parent link
-        try:
-            self._session_db.create_session(
-                session_id=new_session_id,
+            from session_lifecycle import branch_session
+            branch = branch_session(
+                self._session_db,
+                parent_session_id=parent_session_id,
+                history=self.conversation_history,
+                branch_title=branch_name or None,
                 source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                 model=self.model,
                 model_config={
                     "max_iterations": self.max_turns,
                     "reasoning_config": self.reasoning_config,
                 },
-                parent_session_id=parent_session_id,
             )
         except Exception as e:
             _cprint(f"  Failed to create branch session: {e}")
             return
 
-        # Copy conversation history to the new session
-        for msg in self.conversation_history:
-            try:
-                self._session_db.append_message(
-                    session_id=new_session_id,
-                    role=msg.get("role", "user"),
-                    content=msg.get("content"),
-                    tool_name=msg.get("tool_name") or msg.get("name"),
-                    tool_calls=msg.get("tool_calls"),
-                    tool_call_id=msg.get("tool_call_id"),
-                    reasoning=msg.get("reasoning"),
-                )
-            except Exception:
-                pass  # Best-effort copy
-
-        # Set title on the branch
-        try:
-            self._session_db.set_session_title(new_session_id, branch_title)
-        except Exception:
-            pass
-
         # Switch to the new session
-        self.session_id = new_session_id
+        self.session_id = branch.session_id
         self.session_start = now
         self._pending_title = None
         self._resumed = True  # Prevents auto-title generation
 
         # Sync the agent
         if self.agent:
-            self.agent.session_id = new_session_id
+            self.agent.session_id = branch.session_id
             self.agent.session_start = now
             self.agent.reset_session_state()
             if hasattr(self.agent, "_last_flushed_db_idx"):
@@ -6766,7 +6416,7 @@ class HermesCLI:
                 _mm = getattr(self.agent, "_memory_manager", None)
                 if _mm is not None:
                     _mm.on_session_switch(
-                        new_session_id,
+                        branch.session_id,
                         parent_session_id=parent_session_id or "",
                         reset=False,
                         reason="branch",
@@ -6774,13 +6424,12 @@ class HermesCLI:
             except Exception:
                 pass
 
-        msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
         _cprint(
-            f"  ⑂ Branched session \"{branch_title}\""
-            f" ({msg_count} user message{'s' if msg_count != 1 else ''})"
+            f"  ⑂ Branched session \"{branch.title}\""
+            f" ({branch.user_message_count} user message{'s' if branch.user_message_count != 1 else ''})"
         )
         _cprint(f"  Original session: {parent_session_id}")
-        _cprint(f"  Branch session:   {new_session_id}")
+        _cprint(f"  Branch session:   {branch.session_id}")
 
     def save_conversation(self):
         """Save the current conversation to a JSON snapshot under ~/.hermes/sessions/saved/.
@@ -8062,12 +7711,19 @@ class HermesCLI:
         cmd_lower = command.lower().strip()
         cmd_original = command.strip()
 
-        # Resolve aliases via central registry so adding an alias is a one-line
-        # change in hermes_cli/commands.py instead of touching every dispatch site.
-        from hermes_cli.commands import resolve_command as _resolve_cmd
-        _base_word = cmd_lower.split()[0].lstrip("/")
-        _cmd_def = _resolve_cmd(_base_word)
-        canonical = _cmd_def.name if _cmd_def else _base_word
+        # Resolve aliases through the shared dispatch seam; adapters should
+        # branch on canonical handler keys, not the typed token.
+        from hermes_cli.commands import CommandSurface, resolve_command_invocation
+        _cmd_invocation = resolve_command_invocation(
+            cmd_original,
+            surface=CommandSurface.CLI,
+        )
+        _base_word = (
+            _cmd_invocation.raw_name
+            if _cmd_invocation
+            else cmd_lower.split()[0].lstrip("/")
+        )
+        canonical = _cmd_invocation.canonical_name if _cmd_invocation else _base_word
         
         if canonical in {"quit", "exit"}:
             # Parse --delete flag: /exit --delete also removes the current
@@ -8404,13 +8060,30 @@ class HermesCLI:
         elif canonical == "busy":
             self._handle_busy_command(cmd_original)
         else:
-            # Check for user-defined quick commands (bypass agent loop, no LLM call)
-            base_cmd = cmd_lower.split()[0]
-            skill_commands = _ensure_skill_commands()
-            skill_bundles = get_skill_bundles()
+            from hermes_cli.commands import (
+                CommandSurface,
+                resolve_command_dispatch_with_sources,
+            )
+
+            # Shared fallback order: quick command, plugin command, skill bundle,
+            # skill command, then prefix matching. Built-ins have already been
+            # handled above and still take precedence over quick aliases.
             quick_commands = self.config.get("quick_commands", {})
-            if base_cmd.lstrip("/") in quick_commands:
-                qcmd = quick_commands[base_cmd.lstrip("/")]
+            dispatch = resolve_command_dispatch_with_sources(
+                cmd_original,
+                surface=CommandSurface.CLI,
+                quick_commands=quick_commands,
+                skill_bundles_provider=get_skill_bundles,
+                skill_commands_provider=lambda: _skill_commands,
+            )
+            base_cmd = (
+                f"/{dispatch.invocation.raw_name}"
+                if dispatch.invocation.raw_name
+                else cmd_lower.split()[0]
+            )
+
+            if dispatch.route == "quick_exec":
+                qcmd = quick_commands[dispatch.handler_key]
                 if qcmd.get("type") == "exec":
                     import subprocess
                     exec_cmd = qcmd.get("command", "")
@@ -8433,24 +8106,32 @@ class HermesCLI:
                             self._console_print(f"[bold red]Quick command error: {e}[/]")
                     else:
                         self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
-                elif qcmd.get("type") == "alias":
-                    target = qcmd.get("target", "").strip()
-                    if target:
-                        target = target if target.startswith("/") else f"/{target}"
-                        user_args = cmd_original[len(base_cmd):].strip()
-                        aliased_command = f"{target} {user_args}".strip()
-                        return self.process_command(aliased_command)
-                    else:
-                        self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
+            elif dispatch.route == "quick_alias":
+                target = (dispatch.target or "").strip()
+                if target:
+                    target = target if target.startswith("/") else f"/{target}"
+                    user_args = cmd_original[len(base_cmd):].strip()
+                    aliased_command = f"{target} {user_args}".strip()
+                    return self.process_command(aliased_command)
                 else:
-                    self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
+                    self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
+            elif dispatch.route == "quick_unsupported":
+                self._console_print(
+                    f"[bold red]Quick command '{base_cmd}' has unsupported type "
+                    "(supported: 'exec', 'alias')[/]"
+                )
+            elif dispatch.route == "unavailable":
+                self._console_print(
+                    f"[bold red]Command '/{dispatch.invocation.canonical_name}' "
+                    "isn't available in the interactive CLI[/]"
+                )
             # Check for plugin-registered slash commands
-            elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
+            elif dispatch.route == "plugin":
                 from hermes_cli.plugins import (
                     get_plugin_command_handler,
                     resolve_plugin_command_result,
                 )
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+                plugin_handler = get_plugin_command_handler(dispatch.handler_key)
                 if plugin_handler:
                     user_args = cmd_original[len(base_cmd):].strip()
                     try:
@@ -8463,14 +8144,15 @@ class HermesCLI:
                         _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
             # Skill bundles take precedence over individual skills — /<bundle>
             # loads multiple skills at once. Rescans cheaply when files change.
-            elif base_cmd in skill_bundles:
+            elif dispatch.route == "skill_bundle":
                 user_instruction = cmd_original[len(base_cmd):].strip()
+                bundle_key = dispatch.handler_slash_key
                 bundle_result = build_bundle_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    bundle_key, user_instruction, task_id=self.session_id
                 )
                 if bundle_result:
                     msg, loaded_names, missing = bundle_result
-                    bundle_info = skill_bundles[base_cmd]
+                    bundle_info = get_skill_bundles()[bundle_key]
                     print(
                         f"\n⚡ Loading bundle: {bundle_info['name']} "
                         f"({len(loaded_names)} skills)"
@@ -8486,13 +8168,14 @@ class HermesCLI:
                         f"[bold red]Failed to load bundle for {base_cmd}[/]"
                     )
             # Check for skill slash commands (/gif-search, /axolotl, etc.)
-            elif base_cmd in skill_commands:
+            elif dispatch.route == "skill":
                 user_instruction = cmd_original[len(base_cmd):].strip()
+                skill_key = dispatch.handler_slash_key
                 msg = build_skill_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    skill_key, user_instruction, task_id=self.session_id
                 )
                 if msg:
-                    skill_name = skill_commands[base_cmd]["name"]
+                    skill_name = _skill_commands[skill_key]["name"]
                     print(f"\n⚡ Loading skill: {skill_name}")
                     if hasattr(self, '_pending_input'):
                         self._pending_input.put(msg)
@@ -8502,28 +8185,25 @@ class HermesCLI:
                 # Prefix matching: if input uniquely identifies one command, execute it.
                 # Matches against both built-in COMMANDS and installed skill commands so
                 # that execution-time resolution agrees with tab-completion.
-                from hermes_cli.commands import COMMANDS
+                from hermes_cli.commands import (
+                    cli_prefix_command_names,
+                    resolve_command_prefix_match,
+                )
                 typed_base = cmd_lower.split()[0]
-                all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
-                matches = [c for c in all_known if c.startswith(typed_base)]
-                if len(matches) > 1:
-                    # Prefer an exact match (typed the full command name)
-                    exact = [c for c in matches if c == typed_base]
-                    if len(exact) == 1:
-                        matches = exact
-                    else:
-                        # Prefer the unique shortest match:
-                        # /qui → /quit (5) wins over /quint-pipeline (15)
-                        min_len = min(len(c) for c in matches)
-                        shortest = [c for c in matches if len(c) == min_len]
-                        if len(shortest) == 1:
-                            matches = shortest
-                if len(matches) == 1:
+                prefix_match = resolve_command_prefix_match(
+                    typed_base,
+                    cli_prefix_command_names(
+                        skill_commands=_skill_commands,
+                        skill_bundles=get_skill_bundles(),
+                    ),
+                )
+                matches = list(prefix_match.matches)
+                if prefix_match.resolved:
                     # Expand the prefix to the full command name, preserving arguments.
                     # Guard against redispatching the same token to avoid infinite
                     # recursion when the expanded name still doesn't hit an exact branch
                     # (e.g. /config with extra args that are not yet handled above).
-                    full_name = matches[0]
+                    full_name = prefix_match.resolved
                     if full_name == typed_base:
                         # Already an exact token — no expansion possible; fall through
                         _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
@@ -8532,7 +8212,7 @@ class HermesCLI:
                         remainder = cmd_original.strip()[len(typed_base):]
                         full_cmd = full_name + remainder
                         return self.process_command(full_cmd)
-                elif len(matches) > 1:
+                elif prefix_match.ambiguous:
                     _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
                     _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
                 else:
@@ -12270,11 +11950,37 @@ class HermesCLI:
         self._voice_tts_done = threading.Event()  # Signals TTS playback finished
         self._voice_tts_done.set()  # Initially "done" (no TTS pending)
 
-        if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
-            self._install_tool_callbacks()
+        # Register callbacks so terminal_tool prompts route through our UI
+        set_sudo_password_callback(self._sudo_password_callback)
+        set_approval_callback(self._approval_callback)
+        set_secret_capture_callback(self._secret_capture_callback)
 
-        if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
-            self._ensure_tirith_security()
+        # Computer-use shares the same approval UI (prompt_toolkit dialog).
+        # The tool handler expects a 3-arg callback (action, args, summary)
+        # and returns "approve_once" | "approve_session" | "always_approve"
+        # | "deny". Adapt our existing generic callback.
+        try:
+            from tools.computer_use_tool import set_approval_callback as _set_cu_cb
+            _set_cu_cb(self._computer_use_approval_callback)
+        except ImportError:
+            pass  # computer_use extras not installed
+
+        # Ensure tirith security scanner is available (downloads if needed).
+        # Warn the user if tirith is enabled in config but not available,
+        # so they know command security scanning is degraded.  Suppressed
+        # on platforms where tirith ships no binary (Windows etc.) — the
+        # user can't act on it and pattern-matching guards still run.
+        try:
+            from tools.tirith_security import ensure_installed, is_platform_supported
+            tirith_path = ensure_installed(log_failures=False)
+            if tirith_path is None and is_platform_supported():
+                security_cfg = self.config.get("security", {}) or {}
+                tirith_enabled = security_cfg.get("tirith_enabled", True)
+                if tirith_enabled:
+                    _cprint(f"  {_DIM}⚠ tirith security scanner enabled but not available "
+                            f"— command scanning will use pattern matching only{_RST}")
+        except Exception:
+            pass  # Non-fatal — fail-open at scan time if unavailable
         
         # Key bindings for the input area
         kb = KeyBindings()

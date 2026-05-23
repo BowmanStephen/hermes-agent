@@ -160,3 +160,34 @@ class TestCompressionBoundaryHook:
             )
             assert compressed
             assert agent.session_id != original_sid
+
+    def test_split_failure_restores_session_db_created_flag(self):
+        """A failed DB split must not leave future session persistence disabled."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            agent = self._make_agent(db)
+            agent._session_db_created = True
+
+            compressor = MagicMock()
+            compressor.compress.return_value = [{"role": "user", "content": "summary"}]
+            compressor.compression_count = 1
+            compressor.last_prompt_tokens = 0
+            compressor.last_completion_tokens = 0
+            compressor._last_summary_error = None
+            compressor._last_compress_aborted = False
+            agent.context_compressor = compressor
+
+            original_sid = agent.session_id
+            with patch(
+                "session_lifecycle.split_session_for_compression",
+                side_effect=RuntimeError("split failed"),
+            ):
+                compressed, _prompt = agent._compress_context(
+                    [{"role": "user", "content": "m"}], "sys", approx_tokens=100
+                )
+
+            assert compressed
+            assert agent.session_id == original_sid
+            assert agent._session_db_created is True

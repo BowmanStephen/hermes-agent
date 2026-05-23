@@ -15,6 +15,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -975,13 +976,11 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
     "vision",
     "web_extract",
     "compression",
+    "session_search",
     "skills_hub",
     "approval",
     "mcp",
     "title_generation",
-    "triage_specifier",
-    "kanban_decomposer",
-    "profile_describer",
     "curator",
 )
 
@@ -3269,8 +3268,14 @@ async def get_models_analytics(days: int = 30):
 # though uvicorn binds to 127.0.0.1.
 # ---------------------------------------------------------------------------
 
-import re
-import asyncio
+from hermes_cli.dashboard_chat_transport import (
+    ChatEventFanout,
+    DashboardWebSocketGate,
+    DEFAULT_PTY_READ_TIMEOUT,
+    PtyWebSocketTransport,
+    build_chat_session,
+    parse_event_frame,
+)
 
 # PTY bridge is POSIX-only (depends on fcntl/termios/ptyprocess).  On native
 # Windows the import raises; catch and leave PtyBridge=None so the rest of
@@ -3287,9 +3292,7 @@ except ImportError as _pty_import_err:  # pragma: no cover - Windows-only path
         """Stub on platforms where pty_bridge can't be imported."""
         pass
 
-_RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
-_PTY_READ_CHUNK_TIMEOUT = 0.2
-_VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_PTY_READ_CHUNK_TIMEOUT = DEFAULT_PTY_READ_TIMEOUT
 # Starlette's TestClient reports the peer as "testclient"; treat it as
 # loopback so tests don't need to rewrite request scope.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
@@ -3300,25 +3303,19 @@ def _is_public_bind() -> bool:
     return getattr(app.state, "bound_host", "") in {"0.0.0.0", "::"}
 
 
-def _ws_client_is_allowed(ws: "WebSocket") -> bool:
-    """Check if the WebSocket client IP is acceptable.
-
-    Allows loopback always; allows any IP when bound to all-interfaces
-    (--insecure mode, guarded by session token auth).
-    """
-    if _is_public_bind():
-        return True
-    client_host = ws.client.host if ws.client else ""
-    if not client_host:
-        return True
-    return client_host in _LOOPBACK_HOSTS
+def _dashboard_chat_ws_gate() -> DashboardWebSocketGate:
+    return DashboardWebSocketGate(
+        enabled=_DASHBOARD_EMBEDDED_CHAT_ENABLED,
+        expected_token=_SESSION_TOKEN,
+        public_bind=_is_public_bind(),
+        loopback_hosts=_LOOPBACK_HOSTS,
+    )
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
 # the chat tab generates on mount; entries auto-evict when the last subscriber
 # drops AND the publisher has disconnected.
-_event_channels: dict[str, set] = {}
-_event_lock = asyncio.Lock()
+_chat_event_fanout = ChatEventFanout()
 
 
 def _resolve_chat_argv(
@@ -3355,9 +3352,6 @@ def _resolve_chat_argv(
     env.setdefault("HERMES_TUI_INLINE", "1")
 
     if resume:
-        latest_resume, _latest_path = _session_latest_descendant(resume)
-        if latest_resume:
-            resume = latest_resume
         env["HERMES_TUI_RESUME"] = resume
 
     if sidecar_url:
@@ -3366,59 +3360,59 @@ def _resolve_chat_argv(
     return list(argv), str(cwd) if cwd else None, env
 
 
-def _build_sidecar_url(channel: str) -> Optional[str]:
-    """ws:// URL the PTY child should publish events to, or None when unbound."""
-    host = getattr(app.state, "bound_host", None)
-    port = getattr(app.state, "bound_port", None)
+def _latest_descendant_id(session_id: str) -> Optional[str]:
+    latest, _latest_path = _session_latest_descendant(session_id)
 
-    if not host or not port:
-        return None
+    return latest
 
-    netloc = f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
-    qs = urllib.parse.urlencode({"token": _SESSION_TOKEN, "channel": channel})
 
-    return f"ws://{netloc}/api/pub?{qs}"
+def _resolve_dashboard_chat_session(
+    resume: Optional[str],
+    channel: Optional[str],
+):
+    """Resolve resume + sidecar identity for one dashboard chat PTY."""
+    return build_chat_session(
+        requested_resume=resume,
+        channel=channel,
+        host=getattr(app.state, "bound_host", None),
+        port=getattr(app.state, "bound_port", None),
+        token=_SESSION_TOKEN,
+        latest_descendant=_latest_descendant_id,
+    )
 
 
 async def _broadcast_event(channel: str, payload: str) -> None:
     """Fan out one publisher frame to every subscriber on `channel`."""
-    async with _event_lock:
-        subs = list(_event_channels.get(channel, ()))
-
-    for sub in subs:
-        try:
-            await sub.send_text(payload)
-        except Exception:
-            # Subscriber went away mid-send; the /api/events finally clause
-            # will remove it from the registry on its next iteration.
-            _log.warning("broadcast send failed for subscriber on %s", channel, exc_info=True)
+    await _chat_event_fanout.broadcast(channel, payload)
 
 
-def _channel_or_close_code(ws: WebSocket) -> Optional[str]:
-    """Return the channel id from the query string or None if invalid."""
-    channel = ws.query_params.get("channel", "")
+async def _accept_dashboard_chat_ws(
+    ws: WebSocket,
+    *,
+    require_channel: bool = False,
+) -> tuple[bool, Optional[str]]:
+    """Apply dashboard chat WS gates, accept, and return the optional channel."""
+    client_host = ws.client.host if ws.client else ""
+    decision = _dashboard_chat_ws_gate().validate(
+        token=ws.query_params.get("token", ""),
+        client_host=client_host,
+        channel=ws.query_params.get("channel", ""),
+        require_channel=require_channel,
+    )
+    if not decision.accepted:
+        await ws.close(code=decision.close_code or 4403)
+        return False, None
 
-    return channel if _VALID_CHANNEL_RE.match(channel) else None
+    await ws.accept()
+
+    return True, decision.channel
 
 
 @app.websocket("/api/pty")
 async def pty_ws(ws: WebSocket) -> None:
-    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+    accepted, channel = await _accept_dashboard_chat_ws(ws)
+    if not accepted:
         return
-
-    # --- auth + loopback check (before accept so we can close cleanly) ---
-    token = ws.query_params.get("token", "")
-    expected = _SESSION_TOKEN
-    if not hmac.compare_digest(token.encode(), expected.encode()):
-        await ws.close(code=4401)
-        return
-
-    if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
-        return
-
-    await ws.accept()
 
     # On native Windows, the POSIX PTY bridge can't be imported.  Tell the
     # client and close cleanly rather than pretending the feature works.
@@ -3433,18 +3427,21 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
     # --- spawn PTY ------------------------------------------------------
-    resume = ws.query_params.get("resume") or None
-    channel = _channel_or_close_code(ws)
-    sidecar_url = _build_sidecar_url(channel) if channel else None
+    chat_session = _resolve_dashboard_chat_session(
+        resume=ws.query_params.get("resume") or None,
+        channel=channel,
+    )
 
     try:
-        argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
+        argv, cwd, env = _resolve_chat_argv(
+            resume=chat_session.resume,
+            sidecar_url=chat_session.sidecar_url,
+        )
     except SystemExit as exc:
         # _make_tui_argv calls sys.exit(1) when node/npm is missing.
         await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
-
 
     try:
         bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
@@ -3457,58 +3454,14 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=1011)
         return
 
-    loop = asyncio.get_running_loop()
-
-    # --- reader task: PTY master → WebSocket ----------------------------
-    async def pump_pty_to_ws() -> None:
-        while True:
-            chunk = await loop.run_in_executor(
-                None, bridge.read, _PTY_READ_CHUNK_TIMEOUT
-            )
-            if chunk is None:  # EOF
-                return
-            if not chunk:  # no data this tick; yield control and retry
-                await asyncio.sleep(0)
-                continue
-            try:
-                await ws.send_bytes(chunk)
-            except Exception:
-                return
-
-    reader_task = asyncio.create_task(pump_pty_to_ws())
-
-    # --- writer loop: WebSocket → PTY master ----------------------------
     try:
-        while True:
-            msg = await ws.receive()
-            msg_type = msg.get("type")
-            if msg_type == "websocket.disconnect":
-                break
-            raw = msg.get("bytes")
-            if raw is None:
-                text = msg.get("text")
-                raw = text.encode("utf-8") if isinstance(text, str) else b""
-            if not raw:
-                continue
-
-            # Resize escape is consumed locally, never written to the PTY.
-            match = _RESIZE_RE.match(raw)
-            if match and match.end() == len(raw):
-                cols = int(match.group(1))
-                rows = int(match.group(2))
-                bridge.resize(cols=cols, rows=rows)
-                continue
-
-            bridge.write(raw)
+        await PtyWebSocketTransport(
+            bridge,
+            ws,
+            read_timeout=_PTY_READ_CHUNK_TIMEOUT,
+        ).run()
     except WebSocketDisconnect:
         pass
-    finally:
-        reader_task.cancel()
-        try:
-            await reader_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        bridge.close()
 
 
 # ---------------------------------------------------------------------------
@@ -3524,17 +3477,8 @@ async def pty_ws(ws: WebSocket) -> None:
 
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
-    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
-        return
-
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
-        return
-
-    if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
+    accepted, _channel = await _accept_dashboard_chat_ws(ws)
+    if not accepted:
         return
 
     from tui_gateway.ws import handle_ws
@@ -3556,57 +3500,26 @@ async def gateway_ws(ws: WebSocket) -> None:
 
 @app.websocket("/api/pub")
 async def pub_ws(ws: WebSocket) -> None:
-    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+    accepted, channel = await _accept_dashboard_chat_ws(ws, require_channel=True)
+    if not accepted or not channel:
         return
-
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
-        return
-
-    if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
-        return
-
-    channel = _channel_or_close_code(ws)
-    if not channel:
-        await ws.close(code=4400)
-        return
-
-    await ws.accept()
 
     try:
         while True:
-            await _broadcast_event(channel, await ws.receive_text())
+            payload = await ws.receive_text()
+            if parse_event_frame(payload) is not None:
+                await _broadcast_event(channel, payload)
     except WebSocketDisconnect:
         pass
 
 
 @app.websocket("/api/events")
 async def events_ws(ws: WebSocket) -> None:
-    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+    accepted, channel = await _accept_dashboard_chat_ws(ws, require_channel=True)
+    if not accepted or not channel:
         return
 
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
-        return
-
-    if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
-        return
-
-    channel = _channel_or_close_code(ws)
-    if not channel:
-        await ws.close(code=4400)
-        return
-
-    await ws.accept()
-
-    async with _event_lock:
-        _event_channels.setdefault(channel, set()).add(ws)
+    await _chat_event_fanout.subscribe(channel, ws)
 
     try:
         while True:
@@ -3617,14 +3530,7 @@ async def events_ws(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        async with _event_lock:
-            subs = _event_channels.get(channel)
-
-            if subs is not None:
-                subs.discard(ws)
-
-                if not subs:
-                    _event_channels.pop(channel, None)
+        await _chat_event_fanout.unsubscribe(channel, ws)
 
 
 def _normalise_prefix(raw: Optional[str]) -> str:
@@ -4319,13 +4225,12 @@ async def post_agent_plugin_install(request: Request, body: _AgentPluginInstallB
 
 def _validate_plugin_name(name: str) -> str:
     """Reject path-traversal attempts in plugin name URL parameters."""
-    name = name.strip("/")
-    if not name or ".." in name or "\\" in name:
+    if not name or "/" in name or "\\" in name or ".." in name:
         raise HTTPException(status_code=400, detail="Invalid plugin name.")
     return name
 
 
-@app.post("/api/dashboard/agent-plugins/{name:path}/enable")
+@app.post("/api/dashboard/agent-plugins/{name}/enable")
 async def post_agent_plugin_enable(request: Request, name: str):
     _require_token(request)
     name = _validate_plugin_name(name)
@@ -4337,7 +4242,7 @@ async def post_agent_plugin_enable(request: Request, name: str):
     return result
 
 
-@app.post("/api/dashboard/agent-plugins/{name:path}/disable")
+@app.post("/api/dashboard/agent-plugins/{name}/disable")
 async def post_agent_plugin_disable(request: Request, name: str):
     _require_token(request)
     name = _validate_plugin_name(name)
@@ -4349,7 +4254,7 @@ async def post_agent_plugin_disable(request: Request, name: str):
     return result
 
 
-@app.post("/api/dashboard/agent-plugins/{name:path}/update")
+@app.post("/api/dashboard/agent-plugins/{name}/update")
 async def post_agent_plugin_update(request: Request, name: str):
     _require_token(request)
     name = _validate_plugin_name(name)
@@ -4362,7 +4267,7 @@ async def post_agent_plugin_update(request: Request, name: str):
     return result
 
 
-@app.delete("/api/dashboard/agent-plugins/{name:path}")
+@app.delete("/api/dashboard/agent-plugins/{name}")
 async def delete_agent_plugin(request: Request, name: str):
     _require_token(request)
     name = _validate_plugin_name(name)
@@ -4400,7 +4305,7 @@ class _PluginVisibilityBody(BaseModel):
     hidden: bool
 
 
-@app.post("/api/dashboard/plugins/{name:path}/visibility")
+@app.post("/api/dashboard/plugins/{name}/visibility")
 async def post_plugin_visibility(request: Request, name: str, body: _PluginVisibilityBody):
     """Toggle a plugin's sidebar visibility (persists to config.yaml dashboard.hidden_plugins)."""
     _require_token(request)
@@ -4580,7 +4485,7 @@ def start_server(
             )
 
     print(f"  Hermes Web UI → http://{host}:{port}")
-    # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
+    # proxy_headers=False so the dashboard chat WebSocket gate sees the real peer
     # rather than X-Forwarded-For's rewritten value (which would defeat the
     # loopback gate when behind a reverse proxy).
     uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)

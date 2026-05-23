@@ -604,6 +604,9 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
         def get_session(self, target):
             return {"id": target}
 
+        def resolve_resume_session_id(self, target):
+            return target
+
         def reopen_session(self, target):
             captured["reopened"] = target
 
@@ -645,6 +648,132 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
         {"role": "assistant", "text": "root answer"},
     ]
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
+
+
+def test_session_resume_follows_compression_descendant(monkeypatch):
+    captured = {}
+
+    class FakeDB:
+        def get_session(self, target):
+            return {"id": target, "title": "Root"} if target in {"root", "tip"} else None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, target):
+            captured["resolved"] = target
+            return "tip"
+
+        def end_session(self, *_args, **_kwargs):
+            raise AssertionError("TUI resume should not end an unrelated current session")
+
+        def reopen_session(self, target):
+            captured["reopened"] = target
+
+        def get_session_title(self, target):
+            return "Root" if target == "root" else None
+
+        def get_messages_as_conversation(self, target, include_ancestors=False):
+            captured.setdefault("history_calls", []).append((target, include_ancestors))
+            return [{"role": "user", "content": f"{target} prompt"}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *args, **kwargs: types.SimpleNamespace(model="test"),
+    )
+    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test"})
+    monkeypatch.setattr(
+        server, "_init_session", lambda sid, key, agent, history, cols=80: None
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.resume", "params": {"session_id": "root"}}
+    )
+
+    assert resp["result"]["resumed"] == "tip"
+    assert captured["resolved"] == "root"
+    assert captured["reopened"] == "tip"
+    assert captured["history_calls"] == [("tip", False), ("tip", True)]
+
+
+def test_session_branch_preserves_metadata_and_marks_parent_branched(monkeypatch):
+    captured = {"messages": []}
+    sessions = {"parent": {"id": "parent"}}
+
+    class FakeDB:
+        def get_session(self, target):
+            return sessions.get(target)
+
+        def get_session_title(self, target):
+            return "Current Work" if target == "parent" else None
+
+        def get_next_title_in_lineage(self, title):
+            return f"{title} #2"
+
+        def create_session(self, *args, **kwargs):
+            captured["create"] = (args, kwargs)
+            sessions[kwargs["session_id"]] = {
+                "id": kwargs["session_id"],
+                "parent_session_id": kwargs.get("parent_session_id"),
+            }
+
+        def append_message(self, **kwargs):
+            captured["messages"].append(kwargs)
+
+        def set_session_title(self, session_id, title):
+            captured["title"] = (session_id, title)
+
+        def end_session(self, session_id, reason):
+            captured["ended"] = (session_id, reason)
+
+    history = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "content": "world",
+            "finish_reason": "stop",
+            "reasoning_content": "provider scratchpad",
+            "codex_reasoning_items": [{"id": "r1"}],
+        },
+    ]
+    server._sessions["sid"] = _session(session_key="parent", history=history)
+    try:
+        monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+        monkeypatch.setattr(server, "_new_session_key", lambda: "branch")
+        monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+        monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+        monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+        monkeypatch.setattr(
+            server,
+            "_make_agent",
+            lambda *args, **kwargs: types.SimpleNamespace(model="test"),
+        )
+        monkeypatch.setattr(
+            server, "_init_session", lambda sid, key, agent, history, cols=80: None
+        )
+
+        resp = server.handle_request(
+            {"id": "1", "method": "session.branch", "params": {"session_id": "sid"}}
+        )
+
+        assert resp["result"]["title"] == "Current Work #2"
+        assert resp["result"]["parent"] == "parent"
+        assert captured["create"][0] == ()
+        assert captured["create"][1]["session_id"] == "branch"
+        assert captured["create"][1]["parent_session_id"] == "parent"
+        assert captured["title"] == ("branch", "Current Work #2")
+        assert captured["ended"] == ("parent", "branched")
+        assert captured["messages"][1]["role"] == "assistant"
+        assert captured["messages"][1]["finish_reason"] == "stop"
+        assert captured["messages"][1]["reasoning_content"] == "provider scratchpad"
+        assert captured["messages"][1]["codex_reasoning_items"] == [{"id": "r1"}]
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_status_callback_emits_kind_and_text():
@@ -2415,6 +2544,16 @@ def test_command_dispatch_exec_nonzero_surfaces_error(monkeypatch):
     assert "failed" in resp["error"]["message"]
 
 
+def test_command_dispatch_rejects_known_command_unavailable_in_tui():
+    resp = server.handle_request(
+        {"id": "1", "method": "command.dispatch", "params": {"name": "config"}}
+    )
+
+    assert resp["error"]["code"] == 4018
+    assert "/config" in resp["error"]["message"]
+    assert "not available" in resp["error"]["message"]
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(
@@ -4058,6 +4197,10 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
             patch(
                 "hermes_cli.browser_connect.get_chrome_debug_candidates",
                 return_value=[],
+            ),
+            patch(
+                "hermes_cli.browser_connect.manual_chrome_debug_command",
+                return_value=None,
             ),
         ):
             resp = server.handle_request(

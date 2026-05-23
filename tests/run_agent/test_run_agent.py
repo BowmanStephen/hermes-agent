@@ -2143,6 +2143,76 @@ class TestConcurrentToolExecution:
         # Second tool should succeed
         assert "success" in messages[1]["content"]
 
+    def test_concurrent_spinner_stop_uses_invocation_durations(self, agent, monkeypatch):
+        """Quiet concurrent spinner should stop with completed tool durations."""
+        tc1 = _mock_tool_call(name="web_search", arguments='{"q":"one"}', call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments='{"q":"two"}', call_id="c2")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        stops = []
+
+        class FakeSpinner:
+            @staticmethod
+            def get_waiting_faces():
+                return ["^_^"]
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self, message):
+                stops.append(message)
+
+        monkeypatch.setattr("agent.tool_executor.KawaiiSpinner", FakeSpinner)
+        monkeypatch.setattr(agent, "_should_emit_quiet_tool_messages", lambda: True)
+        monkeypatch.setattr(agent, "_should_start_quiet_spinner", lambda: True)
+
+        with patch("run_agent.handle_function_call", return_value='{"ok": true}'):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        assert len(messages) == 2
+        assert stops == ["⚡ 2/2 tools completed in 0.0s total"]
+
+    def test_concurrent_spinner_summary_counts_only_runnable_tools(self, agent, monkeypatch):
+        """Blocked calls in a concurrent batch should not inflate execution summary."""
+        tc1 = _mock_tool_call(name="web_search", arguments='{"query":"blocked"}', call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments='{"query":"allowed"}', call_id="c2")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        starts = []
+        stops = []
+
+        class FakeSpinner:
+            @staticmethod
+            def get_waiting_faces():
+                return ["^_^"]
+
+            def __init__(self, message, *args, **kwargs):
+                starts.append(message)
+
+            def start(self):
+                pass
+
+            def stop(self, message):
+                stops.append(message)
+
+        monkeypatch.setattr("agent.tool_executor.KawaiiSpinner", FakeSpinner)
+        monkeypatch.setattr(agent, "_should_emit_quiet_tool_messages", lambda: True)
+        monkeypatch.setattr(agent, "_should_start_quiet_spinner", lambda: True)
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            lambda _name, args, **_kwargs: "Blocked" if args.get("query") == "blocked" else None,
+        )
+
+        with patch("run_agent.handle_function_call", return_value='{"ok": true}'):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        assert len(messages) == 2
+        assert starts == ["^_^ ⚡ running 1 tools concurrently"]
+        assert stops == ["⚡ 1/1 tools completed in 0.0s total"]
+
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
@@ -2203,6 +2273,21 @@ class TestConcurrentToolExecution:
 
         assert starts == [("c1", "web_search", {"query": "hello"})]
         assert completes == [("c1", "web_search", {"query": "hello"}, '{"success": true}')]
+
+    def test_sequential_steer_injection_runs_after_budget_enforcement(self, agent):
+        tool_call = _mock_tool_call(name="web_search", arguments='{"query":"hello"}', call_id="c1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+        order = []
+        agent._apply_pending_steer_to_tool_results = lambda *_args, **_kwargs: order.append("steer")
+
+        with (
+            patch("run_agent.handle_function_call", return_value='{"success": true}'),
+            patch("agent.tool_result_flow.enforce_turn_budget", lambda *_args, **_kwargs: order.append("budget")),
+        ):
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        assert order == ["budget", "steer"]
 
     def test_concurrent_tool_callbacks_fire_for_each_tool(self, agent):
         tc1 = _mock_tool_call(name="web_search", arguments='{"query":"one"}', call_id="c1")
@@ -2298,6 +2383,53 @@ class TestConcurrentToolExecution:
 
         assert json.loads(result) == {"error": "Blocked"}
         assert agent._turns_since_memory == 5
+
+    def test_concurrent_blocked_memory_tool_does_not_reset_counter(self, agent, monkeypatch):
+        """Concurrent blocked memory calls should preserve the nudge counter."""
+        agent._turns_since_memory = 5
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            lambda *args, **kwargs: "Blocked",
+        )
+        tool_call = _mock_tool_call(
+            name="memory",
+            arguments='{"action":"add","target":"memory","content":"x"}',
+            call_id="c-memory",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+
+        with patch("tools.memory_tool.memory_tool", side_effect=AssertionError("should not run")):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        assert agent._turns_since_memory == 5
+        assert len(messages) == 1
+        assert json.loads(messages[0]["content"]) == {"error": "Blocked"}
+
+    def test_concurrent_all_blocked_tools_skip_execution_activity(self, agent, monkeypatch):
+        """A fully blocked concurrent batch should not look like active execution."""
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            lambda *args, **kwargs: "Blocked",
+        )
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"x"}',
+            call_id="c-blocked",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+        agent._current_tool = None
+        agent._touch_activity = MagicMock()
+
+        with patch("run_agent.handle_function_call", side_effect=AssertionError("should not run")):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        touched = [call.args[0] for call in agent._touch_activity.call_args_list]
+        assert "executing 1 tools concurrently: web_search" not in touched
+        assert agent._current_tool is None
+        assert len(messages) == 1
+        assert json.loads(messages[0]["content"]) == {"error": "Blocked"}
 
 
 class TestPathsOverlap:

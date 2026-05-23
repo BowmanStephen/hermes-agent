@@ -573,9 +573,9 @@ class TestLoadTranscriptDBOnly:
 
 
 class TestSessionStoreSwitchSession:
-    """Regression coverage for gateway /resume session switching semantics."""
+    """Regression coverage for gateway session-key remapping semantics."""
 
-    def test_switch_session_reopens_target_session_in_db(self, tmp_path):
+    def test_switch_session_only_updates_mapping_not_session_db(self, tmp_path):
         from hermes_state import SessionDB
 
         config = GatewayConfig()
@@ -604,10 +604,10 @@ class TestSessionStoreSwitchSession:
 
         assert switched is not None
         assert switched.session_id == target_session_id
-        assert db.get_session(current_session_id)["end_reason"] == "session_switch"
+        assert db.get_session(current_session_id)["end_reason"] is None
         resumed = db.get_session(target_session_id)
-        assert resumed["ended_at"] is None
-        assert resumed["end_reason"] is None
+        assert resumed["ended_at"] is not None
+        assert resumed["end_reason"] == "user_exit"
         db.close()
 
 

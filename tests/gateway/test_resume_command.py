@@ -207,7 +207,7 @@ class TestHandleResumeCommand:
         assert "(1 message)" in result
         call_args = runner.session_store.switch_session.call_args
         assert call_args[0][1] == "compressed_child"
-        runner.session_store.load_transcript.assert_called_with("compressed_child")
+        runner.session_store.load_transcript.assert_not_called()
         db.close()
 
     @pytest.mark.asyncio

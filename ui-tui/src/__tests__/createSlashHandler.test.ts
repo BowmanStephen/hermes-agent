@@ -520,6 +520,53 @@ describe('createSlashHandler', () => {
     })
   })
 
+  it('follows command.dispatch aliases into skill dispatch', async () => {
+    const skillMessage = 'Loaded skill content'
+    const requests: Array<{ method: string; params: unknown }> = []
+    const ctx = buildCtx({
+      gateway: {
+        gw: {
+          getLogTail: vi.fn(() => ''),
+          request: vi.fn((method: string, params: unknown) => {
+            requests.push({ method, params })
+
+            if (method === 'slash.exec') {
+              return Promise.reject(new Error('fall through'))
+            }
+
+            if (method === 'command.dispatch') {
+              const name = (params as { name?: string }).name
+
+              if (name === 'dev') {
+                return Promise.resolve({ type: 'alias', target: 'hermes-agent-dev' })
+              }
+
+              return Promise.resolve({ type: 'skill', message: skillMessage, name: 'hermes-agent-dev' })
+            }
+
+            return Promise.resolve({})
+          })
+        },
+        rpc: vi.fn(() => Promise.resolve({}))
+      }
+    })
+
+    expect(createSlashHandler(ctx)('/dev inspect dispatch')).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(ctx.transcript.send).toHaveBeenCalledWith(skillMessage)
+    })
+    expect(ctx.transcript.sys).toHaveBeenCalledWith('⚡ loading skill: hermes-agent-dev')
+    expect(requests).toContainEqual({
+      method: 'command.dispatch',
+      params: { arg: 'inspect dispatch', name: 'dev', session_id: null }
+    })
+    expect(requests).toContainEqual({
+      method: 'command.dispatch',
+      params: { arg: 'inspect dispatch', name: 'hermes-agent-dev', session_id: null }
+    })
+  })
+
   it('resolves unique local aliases through the catalog', () => {
     const ctx = buildCtx({
       local: {

@@ -117,6 +117,17 @@ def _make_branch_runner():
     ]
     runner.session_store.switch_session.return_value = branched_entry
     runner._session_db = MagicMock()
+    sessions = {"current-session": {"id": "current-session"}}
+    runner._session_db.get_session.side_effect = lambda session_id: sessions.get(session_id)
+
+    def _create_session(*_args, **kwargs):
+        session_id = kwargs["session_id"]
+        sessions[session_id] = {
+            "id": session_id,
+            "parent_session_id": kwargs.get("parent_session_id"),
+        }
+
+    runner._session_db.create_session.side_effect = _create_session
     runner._session_db.get_session_title.return_value = "Current Work"
     runner._session_db.get_next_title_in_lineage.return_value = "Current Work #2"
     return runner, session_key

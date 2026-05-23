@@ -344,6 +344,30 @@ def test_config_roundtrip(server, tmp_path):
     assert server._load_cfg()["model"] == "test/model"
 
 
+def test_commands_catalog_normalizes_slash_prefixed_quick_command_keys(server):
+    """commands.catalog must not render /quick config keys as //quick."""
+    with patch.object(
+        server,
+        "_load_cfg",
+        return_value={
+            "quick_commands": {
+                "/shipit": {
+                    "type": "alias",
+                    "target": "/status",
+                    "description": "Ship it",
+                }
+            }
+        },
+    ), patch("agent.skill_commands.scan_skill_commands", return_value={}):
+        resp = server.handle_request({"id": "catalog", "method": "commands.catalog"})
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert ["/shipit", "Ship it"] in result["pairs"]
+    assert ["//shipit", "Ship it"] not in result["pairs"]
+    assert result["canon"]["/shipit"] == "/shipit"
+
+
 # ── _cli_exec_blocked ────────────────────────────────────────────────
 
 
@@ -389,6 +413,79 @@ def test_slash_exec_rejects_skill_commands(server):
     assert "error" in resp
     assert resp["error"]["code"] == 4018
     assert "skill command" in resp["error"]["message"]
+
+
+def test_slash_exec_rejects_skill_bundle_commands(server):
+    """slash.exec must reject bundles so the TUI falls through to command.dispatch."""
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid, "agent": None}
+
+    fake_bundles = {"/backend-dev": {"name": "Backend Dev"}}
+
+    with patch("agent.skill_bundles.get_skill_bundles", return_value=fake_bundles):
+        resp = server.handle_request({
+            "id": "r-bundle-exec",
+            "method": "slash.exec",
+            "params": {"command": "backend-dev audit", "session_id": sid},
+        })
+
+    assert "error" in resp
+    assert resp["error"]["code"] == 4018
+    assert "skill bundle" in resp["error"]["message"]
+
+
+def test_slash_exec_rejects_quick_commands(server):
+    """slash.exec must reject quick commands so command.dispatch owns them."""
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid, "agent": None}
+
+    with patch.object(
+        server,
+        "_load_cfg",
+        return_value={"quick_commands": {"shipit": {"type": "alias", "target": "/status"}}},
+    ):
+        resp = server.handle_request({
+            "id": "r-quick-exec",
+            "method": "slash.exec",
+            "params": {"command": "shipit", "session_id": sid},
+        })
+
+    assert "error" in resp
+    assert resp["error"]["code"] == 4018
+    assert "quick command" in resp["error"]["message"]
+
+
+def test_command_dispatch_accepts_slash_prefixed_quick_command_key(server):
+    """command.dispatch resolves quick commands stored with a leading slash."""
+    with patch.object(
+        server,
+        "_load_cfg",
+        return_value={"quick_commands": {"/shipit": {"type": "alias", "target": "/status"}}},
+    ):
+        resp = server.handle_request({
+            "id": "r-quick-slash-key",
+            "method": "command.dispatch",
+            "params": {"name": "shipit"},
+        })
+
+    assert "error" not in resp
+    assert resp["result"] == {"type": "alias", "target": "/status"}
+
+
+def test_slash_exec_rejects_unavailable_builtin(server):
+    """slash.exec must not run gateway-only commands through the worker."""
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid, "agent": None}
+
+    resp = server.handle_request({
+        "id": "r-unavailable-exec",
+        "method": "slash.exec",
+        "params": {"command": "topic", "session_id": sid},
+    })
+
+    assert "error" in resp
+    assert resp["error"]["code"] == 4018
+    assert "available" in resp["error"]["message"]
 
 
 def test_slash_exec_handles_plugin_commands_in_live_gateway(server):
@@ -685,6 +782,42 @@ def test_command_dispatch_returns_skill_payload(server):
     assert result["type"] == "skill"
     assert result["message"] == fake_msg
     assert result["name"] == "hermes-agent-dev"
+
+
+def test_command_dispatch_returns_skill_bundle_payload(server):
+    """command.dispatch returns a sendable payload for skill bundles too."""
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid}
+
+    fake_bundles = {"/backend-dev": {"name": "Backend Dev"}}
+    fake_msg = "Loaded bundle content here"
+
+    with patch("agent.skill_bundles.get_skill_bundles", return_value=fake_bundles), \
+         patch("agent.skill_bundles.build_bundle_invocation_message", return_value=(fake_msg, [], [])):
+        resp = server.handle_request({
+            "id": "r-bundle",
+            "method": "command.dispatch",
+            "params": {"name": "backend-dev", "session_id": sid},
+        })
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["type"] == "skill"
+    assert result["message"] == fake_msg
+    assert result["name"] == "Backend Dev"
+
+
+def test_command_dispatch_rejects_unavailable_builtin(server):
+    """command.dispatch reports built-ins gated away from the TUI surface."""
+    resp = server.handle_request({
+        "id": "r-unavailable-dispatch",
+        "method": "command.dispatch",
+        "params": {"name": "topic"},
+    })
+
+    assert "error" in resp
+    assert resp["error"]["code"] == 4018
+    assert "available" in resp["error"]["message"]
 
 
 def test_command_dispatch_awaits_async_plugin_handler(server):

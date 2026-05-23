@@ -2129,6 +2129,16 @@ class TestPtyWebSocket:
                 pass
         assert exc.value.code == 4401
 
+    def test_events_rejects_bad_token(self):
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect(
+                "/api/events?token=wrong&channel=abc"
+            ):
+                pass
+        assert exc.value.code == 4401
+
     def test_rejects_bad_token(self, monkeypatch):
         monkeypatch.setattr(
             self.ws_module,
@@ -2310,12 +2320,14 @@ class TestPtyWebSocket:
         with self.client.websocket_connect(sub_path) as sub:
             # Wait for the subscriber to be registered on the server side.
             # websocket_connect returns when ws.accept() completes, but the
-            # server adds us to ``_event_channels`` in a follow-up await,
+            # transport adds us to its fanout registry in a follow-up await,
             # so a publish immediately after connect can race ahead of the
             # subscriber registration and the message is dropped.
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
-                if ws_mod._event_channels.get("broadcast-test"):
+                if ws_mod._chat_event_fanout.has_subscribers_nowait(
+                    "broadcast-test"
+                ):
                     break
                 time.sleep(0.01)
             else:
@@ -2324,38 +2336,47 @@ class TestPtyWebSocket:
                 )
 
             with self.client.websocket_connect(pub_path) as pub:
-                pub.send_text('{"type":"tool.start","payload":{"tool_id":"t1"}}')
-                # Yield control so the server-side broadcast handler can
-                # process the frame.  TestClient runs the ASGI app in a
-                # background thread; a small sleep gives that thread time
-                # to call _broadcast_event before we start blocking on
-                # receive_text().  Without this, under heavy CI load the
-                # receive can race the broadcast and hang until
-                # pytest-timeout kills us.
-                import queue, threading
-                recv_q: queue.Queue = queue.Queue()
-
-                def _recv():
-                    try:
-                        recv_q.put(sub.receive_text())
-                    except Exception as exc:
-                        recv_q.put(exc)
-
-                t = threading.Thread(target=_recv, daemon=True)
-                t.start()
-                try:
-                    received = recv_q.get(timeout=10.0)
-                except queue.Empty:
-                    raise AssertionError(
-                        "broadcast not received within 10s — server likely "
-                        "dropped the frame silently (see _broadcast_event "
-                        "except Exception: pass)"
-                    )
-                if isinstance(received, Exception):
-                    raise received
+                pub.send_text(
+                    '{"jsonrpc":"2.0","method":"event",'
+                    '"params":{"type":"tool.start","payload":{"tool_id":"t1"}}}'
+                )
+                received = sub.receive_text()
 
         assert "tool.start" in received
         assert '"tool_id":"t1"' in received
+
+    def test_pub_drops_malformed_event_frames(self, monkeypatch):
+        import time
+        from urllib.parse import urlencode
+        from hermes_cli import web_server as ws_mod
+
+        qs = urlencode({"token": self.token, "channel": "typed-event-test"})
+        pub_path = f"/api/pub?{qs}"
+        sub_path = f"/api/events?{qs}"
+
+        with self.client.websocket_connect(sub_path) as sub:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if ws_mod._chat_event_fanout.has_subscribers_nowait(
+                    "typed-event-test"
+                ):
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError(
+                    "subscriber did not register on channel within 5s"
+                )
+
+            with self.client.websocket_connect(pub_path) as pub:
+                pub.send_text('{"type":"tool.start"}')
+                pub.send_text(
+                    '{"jsonrpc":"2.0","method":"event",'
+                    '"params":{"type":"tool.complete","payload":{"tool_id":"t1"}}}'
+                )
+                received = sub.receive_text()
+
+        assert "tool.complete" in received
+        assert '"type":"tool.start"' not in received
 
     def test_events_rejects_missing_channel(self):
         from starlette.websockets import WebSocketDisconnect

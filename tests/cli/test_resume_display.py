@@ -583,11 +583,9 @@ class TestPreloadResumedSession:
         cli.console.file = buf
         cli._preload_resumed_session()
 
-        # Should have executed UPDATE to clear ended_at
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args
-        assert "ended_at = NULL" in call_args[0][0]
-        mock_conn.commit.assert_called_once()
+        # Reopen is owned by the shared lifecycle module, not inline SQL.
+        mock_db.reopen_session.assert_called_once_with("reopen_session")
+        mock_conn.execute.assert_not_called()
 
     def test_singular_user_message_grammar(self):
         """1 user message should say 'message' not 'messages'."""

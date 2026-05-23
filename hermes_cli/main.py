@@ -64,6 +64,21 @@ except ModuleNotFoundError:
 import os
 import sys
 
+# Refactored command implementations
+from hermes_cli.commands import (
+    cmd_auth,
+    cmd_config,
+    cmd_cron,
+    cmd_debug,
+    cmd_doctor,
+    cmd_dump,
+    cmd_gateway,
+    cmd_login,
+    cmd_logout,
+    cmd_status,
+    cmd_version,
+)
+
 
 def _is_termux_startup_environment_fast() -> bool:
     """Tiny Termux check for pre-import startup shortcuts."""
@@ -1804,13 +1819,6 @@ def cmd_chat(args):
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
-
-
-def cmd_gateway(args):
-    """Gateway management commands."""
-    from hermes_cli.gateway import gateway_command
-
-    gateway_command(args)
 
 
 def cmd_proxy(args):
@@ -6055,41 +6063,6 @@ def _model_flow_anthropic(config, current_model=""):
         print("No change.")
 
 
-def cmd_login(args):
-    """Authenticate Hermes CLI with a provider."""
-    from hermes_cli.auth import login_command
-
-    login_command(args)
-
-
-def cmd_logout(args):
-    """Clear provider authentication."""
-    from hermes_cli.auth import logout_command
-
-    logout_command(args)
-
-
-def cmd_auth(args):
-    """Manage pooled credentials."""
-    from hermes_cli.auth_commands import auth_command
-
-    auth_command(args)
-
-
-def cmd_status(args):
-    """Show status of all components."""
-    from hermes_cli.status import show_status
-
-    show_status(args)
-
-
-def cmd_cron(args):
-    """Cron job management."""
-    from hermes_cli.cron import cron_command
-
-    cron_command(args)
-
-
 def cmd_webhook(args):
     """Webhook subscription management."""
     from hermes_cli.webhook import webhook_command
@@ -6140,34 +6113,6 @@ def cmd_hooks(args):
     from hermes_cli.hooks import hooks_command
 
     hooks_command(args)
-
-
-def cmd_doctor(args):
-    """Check configuration and dependencies."""
-    from hermes_cli.doctor import run_doctor
-
-    run_doctor(args)
-
-
-def cmd_dump(args):
-    """Dump setup summary for support/debugging."""
-    from hermes_cli.dump import run_dump
-
-    run_dump(args)
-
-
-def cmd_debug(args):
-    """Debug tools (share report, etc.)."""
-    from hermes_cli.debug import run_debug
-
-    run_debug(args)
-
-
-def cmd_config(args):
-    """Configuration management."""
-    from hermes_cli.config import config_command
-
-    config_command(args)
 
 
 def cmd_backup(args):
@@ -6228,11 +6173,6 @@ def _print_version_info(*, check_updates: bool = True) -> None:
             print("Up to date")
     except Exception:
         pass
-
-
-def cmd_version(args):
-    """Show version."""
-    _print_version_info(check_updates=True)
 
 
 def cmd_uninstall(args):

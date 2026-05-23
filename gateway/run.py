@@ -552,6 +552,11 @@ from hermes_constants import get_hermes_home
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
 
+# Wire extracted config_loader module so it shares the Hermes home path
+from gateway.config_loader import set_hermes_home as _set_loader_home
+
+_set_loader_home(_hermes_home)
+
 # Load environment variables from ~/.hermes/.env first.
 # User-managed env files should override stale shell exports on restart.
 from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
@@ -800,6 +805,13 @@ from gateway.config import (
     HomeChannel,
     PlatformConfig,
     load_gateway_config,
+)
+from gateway.config_loader import (
+    _load_gateway_config,
+    _resolve_gateway_model,
+    _resolve_hermes_bin,
+    _parse_session_key,
+    _format_gateway_process_notification,
 )
 from gateway.session import (
     SessionStore,
@@ -1167,138 +1179,6 @@ def _teams_pipeline_plugin_enabled() -> bool:
     if not isinstance(enabled, list):
         return False
     return "teams_pipeline" in enabled or "teams-pipeline" in enabled
-
-
-def _load_gateway_config() -> dict:
-    """Load and parse ~/.hermes/config.yaml, returning {} on any error.
-
-    Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
-    still see their fixture) and shares the mtime-keyed raw-yaml cache
-    from ``hermes_cli.config.read_raw_config`` when the paths match.
-    """
-    config_path = _hermes_home / 'config.yaml'
-    try:
-        from hermes_cli.config import get_config_path, read_raw_config
-        # Fast path: if _hermes_home agrees with the canonical config
-        # location, reuse the shared cache. Otherwise fall through to a
-        # direct read (keeps test fixtures with a monkeypatched
-        # _hermes_home working).
-        if config_path == get_config_path():
-            return read_raw_config()
-    except Exception:
-        pass
-
-    try:
-        if config_path.exists():
-            import yaml
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f) or {}
-    except Exception:
-        logger.debug("Could not load gateway config from %s", config_path)
-    return {}
-
-
-def _resolve_gateway_model(config: dict | None = None) -> str:
-    """Read model from config.yaml — single source of truth.
-
-    Without this, temporary AIAgent instances (e.g. /compress) fall
-    back to the hardcoded default which fails when the active provider is
-    openai-codex.
-    """
-    cfg = config if config is not None else _load_gateway_config()
-    model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, str):
-        return model_cfg
-    elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
-
-
-def _resolve_hermes_bin() -> Optional[list[str]]:
-    """Resolve the Hermes update command as argv parts.
-
-    Tries in order:
-    1. ``shutil.which("hermes")`` — standard PATH lookup
-    2. ``sys.executable -m hermes_cli.main`` — fallback when Hermes is running
-       from a venv/module invocation and the ``hermes`` shim is not on PATH
-
-    Returns argv parts ready for quoting/joining, or ``None`` if neither works.
-    """
-    import shutil
-
-    hermes_bin = shutil.which("hermes")
-    if hermes_bin:
-        return [hermes_bin]
-
-    try:
-        import importlib.util
-
-        if importlib.util.find_spec("hermes_cli") is not None:
-            return [sys.executable, "-m", "hermes_cli.main"]
-    except Exception:
-        pass
-
-    return None
-
-
-def _parse_session_key(session_key: str) -> "dict | None":
-    """Parse a session key into its component parts.
-
-    Session keys follow the format
-    ``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
-    Returns a dict with ``platform``, ``chat_type``, ``chat_id``, and
-    optionally ``thread_id`` keys, or None if the key doesn't match.
-
-    The 6th element is only returned as ``thread_id`` for chat types where
-    it is unambiguous (``dm`` and ``thread``).  For group/channel sessions
-    the suffix may be a user_id (per-user isolation) rather than a
-    thread_id, so we leave ``thread_id`` out to avoid mis-routing.
-    """
-    parts = session_key.split(":")
-    if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
-        result = {
-            "platform": parts[2],
-            "chat_type": parts[3],
-            "chat_id": parts[4],
-        }
-        if len(parts) > 5 and parts[3] in {"dm", "thread"}:
-            result["thread_id"] = parts[5]
-        return result
-    return None
-
-
-def _format_gateway_process_notification(evt: dict) -> "str | None":
-    """Format a watch pattern event from completion_queue into a [IMPORTANT:] message."""
-    evt_type = evt.get("type", "completion")
-    _sid = evt.get("session_id", "unknown")
-    _cmd = evt.get("command", "unknown")
-
-    if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
-
-    if evt_type == "watch_match":
-        _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
-        _sup = evt.get("suppressed", 0)
-        text = (
-            f"[IMPORTANT: Background process {_sid} matched "
-            f"watch pattern \"{_pat}\".\n"
-            f"Command: {_cmd}\n"
-            f"Matched output:\n{_out}"
-        )
-        if _sup:
-            text += f"\n({_sup} earlier matches were suppressed by rate limit)"
-        text += "]"
-        return text
-
-    return None
-
-
-# Module-level weak reference to the active GatewayRunner instance.
-# Used by tools (e.g. send_message) that need to route through a live
-# adapter for plugin platforms.  Set in GatewayRunner.__init__().
-import weakref as _weakref
-_gateway_runner_ref: _weakref.ref = lambda: None
 
 
 def _normalize_empty_agent_response(

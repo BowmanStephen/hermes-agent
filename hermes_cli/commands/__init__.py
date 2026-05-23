@@ -25,4 +25,8 @@ from .setup import cmd_setup
 from .postinstall import cmd_postinstall
 from .update import cmd_update
 from .completion import cmd_completion
+from .chat import cmd_chat
+from .whatsapp import cmd_whatsapp
+from .profile import cmd_profile
+from .dashboard import cmd_dashboard
 

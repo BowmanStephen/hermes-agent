@@ -38,11 +38,14 @@ import tempfile
 import threading
 import time
 import sqlite3
+import weakref as _weakref
 from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List, Union
+
+_gateway_runner_ref: _weakref.ref = lambda: None
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test

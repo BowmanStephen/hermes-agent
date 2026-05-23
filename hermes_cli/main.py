@@ -67,16 +67,30 @@ import sys
 # Refactored command implementations
 from hermes_cli.commands import (
     cmd_auth,
+    cmd_backup,
+    cmd_completion,
     cmd_config,
     cmd_cron,
     cmd_debug,
     cmd_doctor,
     cmd_dump,
     cmd_gateway,
+    cmd_hooks,
+    cmd_import,
+    cmd_kanban,
     cmd_login,
+    cmd_logs,
     cmd_logout,
+    cmd_model,
+    cmd_postinstall,
+    cmd_proxy,
+    cmd_setup,
+    cmd_slack,
     cmd_status,
+    cmd_uninstall,
+    cmd_update,
     cmd_version,
+    cmd_webhook,
 )
 
 
@@ -1821,17 +1835,6 @@ def cmd_chat(args):
         sys.exit(1)
 
 
-def cmd_proxy(args):
-    """Local OpenAI-compatible proxy to OAuth providers."""
-    # Lazy import — pulls in aiohttp, which is gated behind an extras install
-    # for users who don't run the proxy or the messaging gateway.
-    from hermes_cli.proxy.cli import cmd_proxy as _cmd_proxy
-
-    rc = _cmd_proxy(args)
-    if isinstance(rc, int) and rc != 0:
-        raise SystemExit(rc)
-
-
 def cmd_whatsapp(args):
     """Set up WhatsApp: choose mode, configure, install bridge, pair via QR."""
     _require_tty("whatsapp")
@@ -2052,40 +2055,6 @@ def cmd_whatsapp(args):
         print("  Or install as a service: hermes gateway install")
     else:
         print("⚠ Pairing may not have completed. Run 'hermes whatsapp' to try again.")
-
-
-def cmd_setup(args):
-    """Interactive setup wizard."""
-    from hermes_cli.setup import run_setup_wizard
-
-    run_setup_wizard(args)
-
-
-def cmd_postinstall(args):
-    """One-shot bootstrap for pip users: install non-Python deps + run setup."""
-    from hermes_cli.config import stamp_install_method
-    from hermes_cli.dep_ensure import ensure_dependency
-
-    stamp_install_method("pip")
-
-    print("⚕ Hermes post-install bootstrap")
-    print()
-
-    for dep in ("node", "browser", "ripgrep", "ffmpeg"):
-        ensure_dependency(dep)
-
-    if not _has_any_provider_configured():
-        print()
-        cmd_setup(args)
-    else:
-        print()
-        print("✓ Post-install complete.")
-
-
-def cmd_model(args):
-    """Select default model — starts with provider selection, then model picker."""
-    _require_tty("model")
-    select_provider_and_model(args=args)
 
 
 def _is_profile_api_key_provider(provider_id: str) -> bool:
@@ -6063,77 +6032,6 @@ def _model_flow_anthropic(config, current_model=""):
         print("No change.")
 
 
-def cmd_webhook(args):
-    """Webhook subscription management."""
-    from hermes_cli.webhook import webhook_command
-
-    webhook_command(args)
-
-
-def cmd_slack(args):
-    """Slack integration helpers.
-
-    Dispatches ``hermes slack <subcommand>``. Currently supports:
-      manifest — print or write a Slack app manifest with every gateway
-                 command registered as a first-class slash.
-    """
-    sub = getattr(args, "slack_command", None)
-    if sub in {None, ""}:
-        # No subcommand — print usage hint.
-        print(
-            "usage: hermes slack <subcommand>\n"
-            "\n"
-            "subcommands:\n"
-            "  manifest   Generate a Slack app manifest with every gateway\n"
-            "             command registered as a native slash\n"
-            "\n"
-            "Run `hermes slack manifest -h` for details.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if sub == "manifest":
-        from hermes_cli.slack_cli import slack_manifest_command
-
-        return slack_manifest_command(args)
-
-    print(f"Unknown slack subcommand: {sub}", file=sys.stderr)
-    return 1
-
-
-def cmd_kanban(args):
-    """Multi-profile collaboration board."""
-    from hermes_cli.kanban import kanban_command
-
-    return kanban_command(args)
-
-
-def cmd_hooks(args):
-    """Shell-hook inspection and management."""
-    from hermes_cli.hooks import hooks_command
-
-    hooks_command(args)
-
-
-def cmd_backup(args):
-    """Back up Hermes home directory to a zip file."""
-    if getattr(args, "quick", False):
-        from hermes_cli.backup import run_quick_backup
-
-        run_quick_backup(args)
-    else:
-        from hermes_cli.backup import run_backup
-
-        run_backup(args)
-
-
-def cmd_import(args):
-    """Restore a Hermes backup from a zip file."""
-    from hermes_cli.backup import run_import
-
-    run_import(args)
-
-
 def _print_version_info(*, check_updates: bool = True) -> None:
     print(f"Hermes Agent v{__version__} ({__release_date__})")
     print(f"Project: {PROJECT_ROOT}")
@@ -6173,14 +6071,6 @@ def _print_version_info(*, check_updates: bool = True) -> None:
             print("Up to date")
     except Exception:
         pass
-
-
-def cmd_uninstall(args):
-    """Uninstall Hermes Agent."""
-    _require_tty("uninstall")
-    from hermes_cli.uninstall import run_uninstall
-
-    run_uninstall(args)
 
 
 def _clear_bytecode_cache(root: Path) -> int:
@@ -8488,35 +8378,6 @@ def _run_pre_update_backup(args) -> None:
     print()
 
 
-def cmd_update(args):
-    """Update Hermes Agent to the latest version.
-
-    Thin wrapper around ``_cmd_update_impl``: installs hangup protection,
-    runs the update, then restores stdio on the way out (even on
-    ``sys.exit`` or unhandled exceptions).
-    """
-    from hermes_cli.config import is_managed, managed_error
-
-    if is_managed():
-        managed_error("update Hermes Agent")
-        return
-
-    if getattr(args, "check", False):
-        _cmd_update_check()
-        return
-
-    gateway_mode = getattr(args, "gateway", False)
-
-    # Protect against mid-update terminal disconnects (SIGHUP) and tolerate
-    # writes to a closed stdout.  No-op in gateway mode.  See
-    # _install_hangup_protection for rationale.
-    _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
-    try:
-        _cmd_update_impl(args, gateway_mode=gateway_mode)
-    finally:
-        _finalize_update_output(_update_io_state)
-
-
 def _cmd_update_pip(args):
     """Update Hermes via pip (for PyPI installs)."""
     from hermes_cli import __version__
@@ -10518,40 +10379,6 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,
-    )
-
-
-def cmd_completion(args, parser=None):
-    """Print shell completion script."""
-    from hermes_cli.completion import generate_bash, generate_zsh, generate_fish
-
-    shell = getattr(args, "shell", "bash")
-    if shell == "zsh":
-        print(generate_zsh(parser))
-    elif shell == "fish":
-        print(generate_fish(parser))
-    else:
-        print(generate_bash(parser))
-
-
-def cmd_logs(args):
-    """View and filter Hermes log files."""
-    from hermes_cli.logs import tail_log, list_logs
-
-    log_name = getattr(args, "log_name", "agent") or "agent"
-
-    if log_name == "list":
-        list_logs()
-        return
-
-    tail_log(
-        log_name,
-        num_lines=getattr(args, "lines", 50),
-        follow=getattr(args, "follow", False),
-        level=getattr(args, "level", None),
-        session=getattr(args, "session", None),
-        since=getattr(args, "since", None),
-        component=getattr(args, "component", None),
     )
 
 

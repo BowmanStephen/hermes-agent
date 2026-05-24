@@ -670,15 +670,11 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
 
             return f"{name:<{name_width}}  {last_active:<10}  {source:<5} {sid}"
 
+        from hermes_cli.session_resolver import session_matches_query
+
         def _match(s, query):
             """Check if a session matches the search query (case-insensitive)."""
-            q = query.lower()
-            return (
-                q in (s.get("title") or "").lower()
-                or q in (s.get("preview") or "").lower()
-                or q in s.get("id", "").lower()
-                or q in (s.get("source") or "").lower()
-            )
+            return session_matches_query(s, query)
 
         def _curses_browse(stdscr):
             curses.curs_set(0)
@@ -874,22 +870,17 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
 
 def _resolve_last_session(source: str = "cli") -> Optional[str]:
     """Look up the most recently-used session ID for a source."""
-    db = None
-    try:
-        from hermes_state import SessionDB
+    from hermes_cli.session_resolver import SessionDBStore, SessionResolver
 
-        db = SessionDB()
-        sessions = db.search_sessions(source=source, limit=1)
-        return sessions[0]["id"] if sessions else None
+    store = None
+    try:
+        store = SessionDBStore()
+        return SessionResolver(store).resolve_last(source=source)
     except Exception:
-        pass
+        return None
     finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:
-                pass
-    return None
+        if store is not None:
+            store.close()
 
 
 def _probe_container(cmd: list, backend: str, via_sudo: bool = False):
@@ -1014,44 +1005,22 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
       from an exit summary printed before the bug fix, or from notes) get
       resumed at the live tip instead of a stale parent with no messages.
     """
+    from hermes_cli.session_resolver import SessionDBStore, SessionResolver
+
+    store = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-
-        # Try as exact session ID first
-        session = db.get_session(name_or_id)
-        resolved_id: Optional[str] = None
-        if session:
-            resolved_id = session["id"]
-        else:
-            # Try as title (with auto-latest for lineage)
-            resolved_id = db.resolve_session_by_title(name_or_id)
-
-        if resolved_id:
-            # Project forward through compression chain so resumes land on
-            # the live tip instead of a dead compressed parent.
-            try:
-                resolved_id = db.get_compression_tip(resolved_id) or resolved_id
-            except Exception:
-                pass
-
-        db.close()
-        return resolved_id
+        store = SessionDBStore()
+        return SessionResolver(store).resolve_reference(name_or_id)
     except Exception:
-        pass
-    return None
+        return None
+    finally:
+        if store is not None:
+            store.close()
 
 
 def _read_tui_active_session_file(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return None
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        sid = str(data.get("session_id") or "").strip()
-        return sid or None
-    except Exception:
-        return None
+    from hermes_cli.session_resolver import read_tui_active_session_file
+    return read_tui_active_session_file(path)
 
 
 def _print_tui_exit_summary(

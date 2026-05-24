@@ -96,6 +96,12 @@ from agent.markdown_tables import (
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+from hermes_cli.worktree_manager import (
+    SubprocessGitRunner,
+    WorktreeManager,
+    classify_stale_worktree,
+    path_is_within_root as _wt_path_is_within_root,
+)
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -855,11 +861,7 @@ def _git_repo_root() -> Optional[str]:
 
 def _path_is_within_root(path: Path, root: Path) -> bool:
     """Return True when a resolved path stays within the expected root."""
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    return _wt_path_is_within_root(path, root)
 
 
 def _setup_worktree(repo_root: str = None) -> Optional[Dict[str, str]]:
@@ -998,27 +1000,9 @@ def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> boo
     usable remote baseline to compare against, so treat it as having no
     "unpushed" commits.
     """
-    import subprocess
-
-    try:
-        remote_refs = subprocess.run(
-            ["git", "for-each-ref", "--format=%(refname)", "refs/remotes"],
-            capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
-        )
-        if remote_refs.returncode != 0:
-            return True
-        if not remote_refs.stdout.strip():
-            return False
-
-        result = subprocess.run(
-            ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
-            capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
-        )
-        if result.returncode != 0:
-            return True
-        return bool(result.stdout.strip())
-    except Exception:
-        return True
+    return WorktreeManager(SubprocessGitRunner()).has_unpushed_commits(
+        worktree_path, timeout=timeout
+    )
 
 
 def _cleanup_worktree(info: Dict[str, str] = None) -> None:
@@ -1172,8 +1156,6 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
         return
 
     now = time.time()
-    soft_cutoff = now - (max_age_hours * 3600)       # 24h default
-    hard_cutoff = now - (max_age_hours * 3 * 3600)   # 72h default
 
     for entry in worktrees_dir.iterdir():
         if not entry.is_dir() or not entry.name.startswith("hermes-"):
@@ -1182,19 +1164,24 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
         # Check age
         try:
             mtime = entry.stat().st_mtime
-            if mtime > soft_cutoff:
-                continue  # Too recent — skip
+            if mtime > now - (max_age_hours * 3600):
+                continue  # Too recent — skip without any git call
         except Exception:
             continue
 
-        force = mtime <= hard_cutoff  # Over 72h — force remove
+        force = mtime <= now - (max_age_hours * 3 * 3600)  # over 72h
+        # Only pay for the unpushed-commit check in the mid-age tier; the
+        # decision itself lives in the tested classify_stale_worktree.
+        has_unpushed = (
+            False if force else _worktree_has_unpushed_commits(str(entry), timeout=5)
+        )
+        decision = classify_stale_worktree(
+            mtime=mtime, now=now, max_age_hours=max_age_hours, has_unpushed=has_unpushed
+        )
+        if decision == "skip":
+            continue
 
-        if not force:
-            # 24h–72h tier: only remove if no unpushed commits
-            if _worktree_has_unpushed_commits(str(entry), timeout=5):
-                continue  # Has unpushed commits or can't check — skip
-
-        # Safe to remove
+        # decision is "remove" or "force" — both remove (always --force)
         try:
             branch_result = subprocess.run(
                 ["git", "branch", "--show-current"],
@@ -1225,66 +1212,9 @@ def _prune_orphaned_branches(repo_root: str) -> None:
     workflows respectively.  Once their worktree is gone they serve no
     purpose and just accumulate.
     """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            capture_output=True, text=True, timeout=10, cwd=repo_root,
-        )
-        if result.returncode != 0:
-            return
-        all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
-    except Exception:
-        return
-
-    # Collect branches that are actively checked out in a worktree
-    active_branches: set = set()
-    try:
-        wt_result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, timeout=10, cwd=repo_root,
-        )
-        for line in wt_result.stdout.split("\n"):
-            if line.startswith("branch refs/heads/"):
-                active_branches.add(line.split("branch refs/heads/", 1)[-1].strip())
-    except Exception:
-        return  # Can't determine active branches — bail
-
-    # Also protect the currently checked-out branch and main
-    try:
-        head_result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True, text=True, timeout=5, cwd=repo_root,
-        )
-        current = head_result.stdout.strip()
-        if current:
-            active_branches.add(current)
-    except Exception:
-        pass
-    active_branches.add("main")
-
-    orphaned = [
-        b for b in all_branches
-        if b not in active_branches
-        and (b.startswith("hermes/hermes-") or b.startswith("pr-"))
-    ]
-
-    if not orphaned:
-        return
-
-    # Delete in batches
-    for i in range(0, len(orphaned), 50):
-        batch = orphaned[i:i + 50]
-        try:
-            subprocess.run(
-                ["git", "branch", "-D"] + batch,
-                capture_output=True, text=True, timeout=30, cwd=repo_root,
-            )
-        except Exception as e:
-            logger.debug("Failed to prune orphaned branches: %s", e)
-
-    logger.debug("Pruned %d orphaned branches", len(orphaned))
+    orphaned = WorktreeManager(SubprocessGitRunner()).prune_orphaned_branches(repo_root)
+    if orphaned:
+        logger.debug("Pruned %d orphaned branches", len(orphaned))
 
 # ============================================================================
 # ASCII Art & Branding

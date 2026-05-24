@@ -823,6 +823,7 @@ from gateway.session import (
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter
+from gateway.voice_mode_store import VoiceModeStore
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -1484,8 +1485,11 @@ class GatewayRunner:
         from gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
 
-        # Per-chat voice reply mode: "off" | "voice_only" | "all"
-        self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        # Per-chat voice reply mode: "off" | "voice_only" | "all".
+        # VoiceModeStore owns persistence + validation; _voice_mode is the live
+        # backing dict the /voice handlers mutate in place before _save_voice_modes().
+        self._voice_store = VoiceModeStore(self._VOICE_MODE_PATH)
+        self._voice_mode: Dict[str, str] = self._voice_store.live_modes()
         # Recent voice transcripts per (guild,user) for duplicate suppression.
         # Protects against the same utterance being emitted twice by the voice
         # capture / STT pipeline, which otherwise produces a second delayed reply.
@@ -1593,40 +1597,8 @@ class GatewayRunner:
         """Return a platform-namespaced key for voice mode state."""
         return f"{platform.value}:{chat_id}"
 
-    def _load_voice_modes(self) -> Dict[str, str]:
-        try:
-            data = json.loads(self._VOICE_MODE_PATH.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-        if not isinstance(data, dict):
-            return {}
-
-        valid_modes = {"off", "voice_only", "all"}
-        result = {}
-        for chat_id, mode in data.items():
-            if mode not in valid_modes:
-                continue
-            key = str(chat_id)
-            # Skip legacy unprefixed keys (warn and skip)
-            if ":" not in key:
-                logger.warning(
-                    "Skipping legacy unprefixed voice mode key %r during migration. "
-                    "Re-enable voice mode on that chat to rebuild the prefixed key.",
-                    key,
-                )
-                continue
-            result[key] = mode
-        return result
-
     def _save_voice_modes(self) -> None:
-        try:
-            self._VOICE_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._VOICE_MODE_PATH.write_text(
-                json.dumps(self._voice_mode, indent=2)
-            )
-        except OSError as e:
-            logger.warning("Failed to save voice modes: %s", e)
+        self._voice_store.save()
 
     def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
         """Update an adapter's in-memory auto-TTS suppression set if present."""
@@ -1693,15 +1665,11 @@ class GatewayRunner:
         prefix = f"{platform.value}:"
         if isinstance(disabled_chats, set):
             disabled_chats.clear()
-            disabled_chats.update(
-                key[len(prefix):] for key, mode in self._voice_mode.items()
-                if mode == "off" and key.startswith(prefix)
-            )
+            disabled_chats.update(self._voice_store.keys_for_modes({"off"}, prefix))
         if isinstance(enabled_chats, set):
             enabled_chats.clear()
             enabled_chats.update(
-                key[len(prefix):] for key, mode in self._voice_mode.items()
-                if mode in {"voice_only", "all"} and key.startswith(prefix)
+                self._voice_store.keys_for_modes({"voice_only", "all"}, prefix)
             )
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:

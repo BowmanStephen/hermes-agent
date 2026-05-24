@@ -50,6 +50,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled
 from hermes_cli.config import cfg_get
+from hermes_cli.plugin_tool_contract import ContractViolation, validate_tool_contract
 
 
 def get_bundled_plugins_dir() -> Path:
@@ -278,6 +279,7 @@ class LoadedPlugin:
     commands_registered: List[str] = field(default_factory=list)
     enabled: bool = False
     error: Optional[str] = None
+    contract_violations: List["ContractViolation"] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1212,6 +1214,27 @@ class PluginManager:
                     c for c in self._plugin_commands
                     if self._plugin_commands[c].get("plugin") == manifest.name
                 ]
+                # Tool contract: the manifest's provides_tools must match what
+                # register() actually wired up. A plugin that advertises tools
+                # it never registers (e.g. hermes-lcm #200) otherwise ships a
+                # phantom tool surface the model is told to use. Fail-open:
+                # a mismatch is logged/recorded, never fatal to plugin load.
+                loaded.contract_violations = validate_tool_contract(
+                    manifest.provides_tools, loaded.tools_registered
+                )
+                for violation in loaded.contract_violations:
+                    if violation.severity == "error":
+                        logger.warning(
+                            "Plugin '%s' advertises tool '%s' in provides_tools "
+                            "but register() never registered it",
+                            manifest.name, violation.tool,
+                        )
+                    else:
+                        logger.info(
+                            "Plugin '%s' registered tool '%s' not listed in "
+                            "provides_tools (stale manifest)",
+                            manifest.name, violation.tool,
+                        )
                 loaded.enabled = True
                 logger.debug(
                     "  registered: %d tool(s), %d hook(s), %d slash command(s), %d CLI command(s)",

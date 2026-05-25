@@ -1,7 +1,6 @@
 """Tests for gateway /reasoning command and hot reload behavior."""
 
 import asyncio
-import inspect
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +10,7 @@ import yaml
 
 import gateway.run as gateway_run
 from gateway.config import Platform
+from gateway.command_registry import GATEWAY_HANDLER_METHODS
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
@@ -74,8 +74,7 @@ class TestReasoningCommand:
         assert "/reasoning [level|show|hide]" in result
 
     def test_reasoning_is_known_command(self):
-        source = inspect.getsource(gateway_run.GatewayRunner._handle_message)
-        assert '"reasoning"' in source
+        assert GATEWAY_HANDLER_METHODS["reasoning"] == "_handle_reasoning_command"
 
     def test_parse_reasoning_command_args_accepts_ascii_and_smart_global_flags(self):
         assert gateway_run.GatewayRunner._parse_reasoning_command_args("high --global") == ("high", True)

@@ -149,7 +149,13 @@ Reasoning content is stored in `assistant_msg["reasoning"]`.
 - `process_command()` is a method on `HermesCLI` — dispatches on canonical command name resolved via `resolve_command()` from the central registry
 - Skill slash commands: `agent/skill_commands.py` scans `~/.hermes/skills/`, injects as **user message** (not system prompt) to preserve prompt caching
 
-### Slash Command Registry (`hermes_cli/commands.py`)
+### Slash Command Registry (`hermes_cli/commands/_registry.py`)
+
+The `hermes_cli/commands/` package re-exports the registry API through its
+`__init__.py`, so `from hermes_cli.commands import COMMAND_REGISTRY,
+CommandDef, resolve_command, ...` still works — but the definitions live in
+`hermes_cli/commands/_registry.py` (the former `hermes_cli/commands.py`
+monolith). Edit `_registry.py`, not a top-level `commands.py`.
 
 All slash commands are defined in a central `COMMAND_REGISTRY` list of `CommandDef` objects. Every downstream consumer derives from this registry automatically:
 
@@ -163,7 +169,7 @@ All slash commands are defined in a central `COMMAND_REGISTRY` list of `CommandD
 
 ### Adding a Slash Command
 
-1. Add a `CommandDef` entry to `COMMAND_REGISTRY` in `hermes_cli/commands.py`:
+1. Add a `CommandDef` entry to `COMMAND_REGISTRY` in `hermes_cli/commands/_registry.py`:
 ```python
 CommandDef("mycommand", "Description of what it does", "Session",
            aliases=("mc",), args_hint="[arg]"),
@@ -703,11 +709,12 @@ Each platform's adapter picks a base toolset (e.g. Telegram uses
 `"messaging"`); `_HERMES_CORE_TOOLS` is the default bundle most
 platforms inherit from.
 
-Current toolset keys: `browser`, `clarify`, `code_execution`, `cronjob`,
-`debugging`, `delegation`, `discord`, `discord_admin`, `feishu_doc`,
+Current toolset keys: `browser`, `clarify`, `code_execution`, `computer_use`,
+`cronjob`, `debugging`, `delegation`, `discord`, `discord_admin`, `feishu_doc`,
 `feishu_drive`, `file`, `homeassistant`, `image_gen`, `kanban`, `memory`,
-`messaging`, `moa`, `rl`, `safe`, `search`, `session_search`, `skills`,
-`spotify`, `terminal`, `todo`, `tts`, `video`, `vision`, `web`, `yuanbao`.
+`messaging`, `moa`, `safe`, `search`, `session_search`, `skills`, `spotify`,
+`terminal`, `todo`, `tts`, `video`, `video_gen`, `vision`, `web`, `x_search`,
+`yuanbao`.
 
 Enable/disable per platform via `hermes tools` (the curses UI) or the
 `tools.<platform>.enabled` / `tools.<platform>.disabled` lists in
@@ -1012,40 +1019,52 @@ def profile_env(tmp_path, monkeypatch):
 
 ## Testing
 
-**ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The script enforces
-hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8,
-`-n auto` xdist workers, in-tree subprocess-isolation plugin). Direct `pytest`
-on a 16+ core developer machine with API keys set diverges from CI in ways
-that have caused multiple "works locally, fails in CI" incidents (and the reverse).
+**ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The wrapper
+runs the suite through `scripts/run_tests_parallel.py` (per-file process
+isolation, see below) under a hermetic environment matching CI: credential
+vars blanked, `TZ=UTC`, `LANG=C.UTF-8`/`LC_ALL=C.UTF-8`, `PYTHONHASHSEED=0`,
+and a clean `env -i`. Direct `pytest` on a 16+ core developer machine with API
+keys set diverges from CI in ways that have caused multiple "works locally,
+fails in CI" incidents (and the reverse).
+
+Positional arguments are discovery roots (directories or `.py` files).
+Everything after a literal `--` is passed through to each per-file `pytest`
+invocation.
 
 ```bash
 scripts/run_tests.sh                                  # full suite, CI-parity
 scripts/run_tests.sh tests/gateway/                   # one directory
-scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
-scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
-scripts/run_tests.sh --no-isolate tests/foo/          # disable subprocess isolation (faster, for debugging)
+scripts/run_tests.sh tests/agent/ tests/acp/          # multiple roots
+scripts/run_tests.sh tests/agent/test_foo.py          # one file
+scripts/run_tests.sh tests/agent/test_foo.py -- -k test_x   # one test (pytest -k)
+scripts/run_tests.sh -- -v --tb=long                  # pass-through pytest flags
+scripts/run_tests.sh -j 4                             # cap parallelism (default: cpu_count*2)
 ```
 
-### Subprocess-per-test isolation
+### Per-file process isolation
 
-Every test runs in a freshly-spawned Python subprocess via the in-tree plugin
-at `tests/_isolate_plugin.py`. This means module-level dicts/sets and
-ContextVars from one test cannot leak into the next — the historic
-`_reset_module_state` autouse fixture is gone.
+Each test **file** runs in its own freshly-spawned `python -m pytest <file>`
+subprocess via `scripts/run_tests_parallel.py`. Module-level dicts/sets and
+ContextVars from tests in one file therefore cannot leak into tests in another
+file. This replaces both the historic `_reset_module_state` autouse fixture
+*and* a brief experiment with subprocess-per-*test* isolation (too slow at
+~17k tests). There is **no xdist** and no shared workers.
 
 Implementation notes:
 
-- The plugin uses `multiprocessing.get_context("spawn")`, which works on
-  Linux, macOS, and Windows alike (POSIX `fork` is not used).
-- Per-test overhead is ~0.5–1.0s (Python startup + pytest collection). xdist
-  parallelism amortizes this across cores; on a 20-core box the full suite
-  finishes in roughly the same wall time as before, but flake-free.
-- `isolate_timeout` (configured in `pyproject.toml`) caps each test at 30s.
-  Hangs are killed and surfaced as a failure report.
-- Pass `--no-isolate` to disable isolation — useful when debugging a single
-  test interactively, or when you specifically want to verify state leakage.
-- The plugin disables itself in child processes (sentinel envvar
-  `HERMES_ISOLATE_CHILD=1`), so there's no fork-bomb risk.
+- Intra-file ordering is the test author's responsibility — if test A in
+  `foo.py` mutates state that test B in `foo.py` reads, that's a real bug to
+  fix in the file (it would also bite anyone running `pytest tests/foo.py`
+  directly).
+- Parallelism is a thread pool of `-j`/`--jobs` workers (default
+  `$HERMES_TEST_WORKERS` or `cpu_count*2`), each running one file subprocess
+  at a time.
+- `--file-timeout` (default 600s / 10 min, env `HERMES_TEST_FILE_TIMEOUT`)
+  caps each *file*; on overrun the pytest subprocess and its full process tree
+  are SIGKILL'd. A per-*test* 30s cap is enforced separately by `pytest-timeout`
+  via `addopts = "... --timeout=30 --timeout-method=signal"` in `pyproject.toml`.
+- `--slice I/N` distributes files across CI jobs by cached duration so each
+  slice takes roughly equal wall time.
 
 ### Why the wrapper (and why the old "just call pytest" doesn't work)
 
@@ -1057,31 +1076,27 @@ Five real sources of local-vs-CI drift the script closes:
 | HOME / `~/.hermes/` | Your real config+auth.json | Temp dir per test |
 | Timezone | Local TZ (PDT etc.) | UTC |
 | Locale | Whatever is set | C.UTF-8 |
-| xdist workers | `-n auto` = all cores | `-n auto` (safe — subprocess isolation prevents cross-worker flakes) |
+| Hash randomization | Random per run | `PYTHONHASHSEED=0` (deterministic) |
 
-`tests/conftest.py` also enforces points 1-4 as an autouse fixture so ANY pytest
-invocation (including IDE integrations) gets hermetic behavior — but the wrapper
-is belt-and-suspenders.
+`tests/conftest.py` also enforces the credential/HOME/TZ/locale points as an
+autouse fixture so ANY pytest invocation (including IDE integrations) gets the
+hermetic *environment*. It does **not** provide per-file process isolation —
+that comes only from running through `run_tests_parallel.py`.
 
 ### Running without the wrapper (only if you must)
 
 If you can't use the wrapper (e.g. inside an IDE that shells pytest directly),
-at minimum activate the venv. The isolation plugin loads automatically from
-`addopts` in `pyproject.toml`, so you get the same per-test process isolation
-either way.
+activate the venv and run pytest normally. `conftest.py` gives you the hermetic
+environment, but you will **not** get per-file process isolation — so a test
+that leaks module-level state can pass or fail depending on collection order.
+When in doubt, reproduce through the wrapper before trusting the result.
 
 ```bash
 source .venv/bin/activate   # or: source venv/bin/activate
-python -m pytest tests/ -q
+python -m pytest tests/agent/test_foo.py -q
 ```
 
-If you need to bypass isolation for fast feedback while debugging:
-
-```bash
-python -m pytest tests/agent/test_foo.py -q --no-isolate
-```
-
-Always run the full suite before pushing changes.
+Always run the full suite via `scripts/run_tests.sh` before pushing changes.
 
 ### Don't write change-detector tests
 

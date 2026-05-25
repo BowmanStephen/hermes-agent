@@ -12,6 +12,13 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gateway_user_config(monkeypatch):
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+
+
 def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
     return SessionSource(
         platform=platform,

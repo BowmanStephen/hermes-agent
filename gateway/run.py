@@ -1591,6 +1591,13 @@ class GatewayRunner:
             self.session_store,
         )
 
+        from gateway.command_registry import GATEWAY_HANDLER_METHODS
+
+        self._gateway_cold_handlers = {
+            name: getattr(self, method_name)
+            for name, method_name in GATEWAY_HANDLER_METHODS.items()
+        }
+
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
         # Recent voice transcripts per (guild,user) for duplicate suppression.
@@ -5068,50 +5075,6 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
-    def _gateway_cold_command_handlers(self) -> Dict[str, Any]:
-        """Explicit handler map for MessageRouter cold-path dispatch."""
-        return {
-            "topic": self._handle_topic_command,
-            "help": self._handle_help_command,
-            "commands": self._handle_commands_command,
-            "profile": self._handle_profile_command,
-            "whoami": self._handle_whoami_command,
-            "status": self._handle_status_command,
-            "agents": self._handle_agents_command,
-            "platform": self._handle_platform_command,
-            "restart": self._handle_restart_command,
-            "stop": self._handle_stop_command,
-            "reasoning": self._handle_reasoning_command,
-            "fast": self._handle_fast_command,
-            "verbose": self._handle_verbose_command,
-            "footer": self._handle_footer_command,
-            "yolo": self._handle_yolo_command,
-            "model": self._handle_model_command,
-            "codex-runtime": self._handle_codex_runtime_command,
-            "personality": self._handle_personality_command,
-            "kanban": self._handle_kanban_command,
-            "retry": self._handle_retry_command,
-            "sethome": self._handle_set_home_command,
-            "compress": self._handle_compress_command,
-            "usage": self._handle_usage_command,
-            "insights": self._handle_insights_command,
-            "reload-mcp": self._handle_reload_mcp_command,
-            "reload-skills": self._handle_reload_skills_command,
-            "bundles": self._handle_bundles_command,
-            "approve": self._handle_approve_command,
-            "deny": self._handle_deny_command,
-            "update": self._handle_update_command,
-            "debug": self._handle_debug_command,
-            "title": self._handle_title_command,
-            "resume": self._handle_resume_command,
-            "branch": self._handle_branch_command,
-            "rollback": self._handle_rollback_command,
-            "background": self._handle_background_command,
-            "goal": self._handle_goal_command,
-            "subgoal": self._handle_subgoal_command,
-            "voice": self._handle_voice_command,
-        }
-
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -5762,7 +5725,7 @@ class GatewayRunner:
                 task_id=_quick_key,
                 config=self.config,
                 hooks_emit_collect=self.hooks.emit_collect,
-                gateway_handlers=self._gateway_cold_command_handlers(),
+                gateway_handlers=self._gateway_cold_handlers,
                 check_slash_access=self._check_slash_access,
                 is_telegram_topic_root_lobby=self._is_telegram_topic_root_lobby,
                 telegram_topic_root_new_message=self._telegram_topic_root_new_message,

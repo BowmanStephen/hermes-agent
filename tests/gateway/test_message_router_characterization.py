@@ -79,7 +79,7 @@ def _make_runner():
         runner._event_bus,
         runner.session_store,
     )
-    runner._gateway_cold_command_handlers = lambda: {
+    runner._gateway_cold_handlers = {
         "approve": runner._handle_approve_command,
     }
     runner.pairing_store = MagicMock()
@@ -829,6 +829,7 @@ async def test_pending_slash_confirm_approve_resolves_confirmation_not_command()
     runner._handle_approve_command = AsyncMock(
         side_effect=AssertionError("/approve command should not run")
     )
+    runner._gateway_cold_handlers["approve"] = runner._handle_approve_command
 
     result = await runner._handle_message(event)
 
@@ -860,6 +861,7 @@ async def test_tool_approval_takes_precedence_over_pending_slash_confirm(monkeyp
         lambda _session_key: True,
     )
     runner._handle_approve_command = AsyncMock(return_value="tool approved")
+    runner._gateway_cold_handlers["approve"] = runner._handle_approve_command
 
     result = await runner._handle_message(event)
 

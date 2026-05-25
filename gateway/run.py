@@ -1581,6 +1581,16 @@ class GatewayRunner:
         from gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
 
+        from gateway.event_bus import EventBus
+        from gateway.message_router import MessageRouter
+
+        self._event_bus = EventBus()
+        self._message_router = MessageRouter(
+            self.config,
+            self._event_bus,
+            self.session_store,
+        )
+
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
         # Recent voice transcripts per (guild,user) for duplicate suppression.
@@ -5058,6 +5068,50 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    def _gateway_cold_command_handlers(self) -> Dict[str, Any]:
+        """Explicit handler map for MessageRouter cold-path dispatch."""
+        return {
+            "topic": self._handle_topic_command,
+            "help": self._handle_help_command,
+            "commands": self._handle_commands_command,
+            "profile": self._handle_profile_command,
+            "whoami": self._handle_whoami_command,
+            "status": self._handle_status_command,
+            "agents": self._handle_agents_command,
+            "platform": self._handle_platform_command,
+            "restart": self._handle_restart_command,
+            "stop": self._handle_stop_command,
+            "reasoning": self._handle_reasoning_command,
+            "fast": self._handle_fast_command,
+            "verbose": self._handle_verbose_command,
+            "footer": self._handle_footer_command,
+            "yolo": self._handle_yolo_command,
+            "model": self._handle_model_command,
+            "codex-runtime": self._handle_codex_runtime_command,
+            "personality": self._handle_personality_command,
+            "kanban": self._handle_kanban_command,
+            "retry": self._handle_retry_command,
+            "sethome": self._handle_set_home_command,
+            "compress": self._handle_compress_command,
+            "usage": self._handle_usage_command,
+            "insights": self._handle_insights_command,
+            "reload-mcp": self._handle_reload_mcp_command,
+            "reload-skills": self._handle_reload_skills_command,
+            "bundles": self._handle_bundles_command,
+            "approve": self._handle_approve_command,
+            "deny": self._handle_deny_command,
+            "update": self._handle_update_command,
+            "debug": self._handle_debug_command,
+            "title": self._handle_title_command,
+            "resume": self._handle_resume_command,
+            "branch": self._handle_branch_command,
+            "rollback": self._handle_rollback_command,
+            "background": self._handle_background_command,
+            "goal": self._handle_goal_command,
+            "subgoal": self._handle_subgoal_command,
+            "voice": self._handle_voice_command,
+        }
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -5699,372 +5753,31 @@ class GatewayRunner:
             # which is read by _run_agent. Removed to prevent unbounded growth.
             return None
 
-        # Check for commands
-        command = event.get_command()
+        from gateway.message_router import ColdRouteContext, ColdRouteOutcome
 
-        from hermes_cli.commands import (
-            CommandSurface,
-            is_gateway_known_command,
-            resolve_command_invocation,
-            resolve_plugin_command_dispatch,
-        )
-        from gateway.cold_command_router import (
-            COMMAND_HOOK_DENY,
-            COMMAND_HOOK_HANDLED,
-            COMMAND_HOOK_REWRITE,
-            build_bundle_invocation,
-            build_skill_invocation_decision,
-            execute_plugin_command,
-            execute_quick_command,
-            resolve_builtin_precedence_quick_alias,
-            resolve_cold_command_dispatch,
-            resolve_command_hook_decision,
-            should_return_unknown_slash_command,
-            unavailable_gateway_command_response,
-            unknown_slash_command_response,
-        )
-
-        # Resolve aliases to canonical handler keys through the shared seam so
-        # dispatch, hooks, and access checks do not depend on the typed alias.
-        _cmd_invocation = (
-            resolve_command_invocation(
-                name=command,
-                args=event.get_command_args().strip(),
-                surface=CommandSurface.GATEWAY,
+        _cold_route = await self._message_router.route_cold_command(
+            ColdRouteContext(
+                event=event,
+                source=source,
+                task_id=_quick_key,
+                config=self.config,
+                hooks_emit_collect=self.hooks.emit_collect,
+                gateway_handlers=self._gateway_cold_command_handlers(),
+                check_slash_access=self._check_slash_access,
+                is_telegram_topic_root_lobby=self._is_telegram_topic_root_lobby,
+                telegram_topic_root_new_message=self._telegram_topic_root_new_message,
+                should_send_telegram_lobby_reminder=self._should_send_telegram_lobby_reminder,
+                telegram_topic_root_lobby_message=self._telegram_topic_root_lobby_message,
+                status_action_gerund=self._status_action_gerund,
+                maybe_confirm_destructive_slash=self._maybe_confirm_destructive_slash,
+                handle_reset_command=self._handle_reset_command,
+                handle_undo_command=self._handle_undo_command,
+                unavailable_skill_checker=_check_unavailable_skill,
+                draining=self._draining,
             )
-            if command
-            else None
         )
-        canonical = _cmd_invocation.canonical_name if _cmd_invocation else command
-
-        # Expand alias quick commands before built-in dispatch so targets like
-        # /model openai/gpt-5.5 --provider openrouter reach the /model handler.
-        # Preserve built-in precedence; aliases only need early handling when
-        # the typed command is not already known.
-        _alias_rewrite = resolve_builtin_precedence_quick_alias(
-            config=self.config,
-            command=command,
-            command_args=event.get_command_args().strip(),
-        )
-        if _alias_rewrite is not None:
-            event.text = _alias_rewrite.text
-            command = _alias_rewrite.command
-            _cmd_invocation = (
-                resolve_command_invocation(
-                    name=command,
-                    args=event.get_command_args().strip(),
-                    surface=CommandSurface.GATEWAY,
-                )
-                if command
-                else None
-            )
-            canonical = _cmd_invocation.canonical_name if _cmd_invocation else command
-
-        # Per-platform slash command access control. Only kicks in when the
-        # operator has set ``allow_admin_from`` for the source's scope (DM
-        # vs group). When unset → backward-compat: every allowed user can
-        # run every command. When set → non-admins can run only commands in
-        # ``user_allowed_commands`` (plus the always-allowed floor: /help,
-        # /whoami). Plain chat is unaffected — only slash commands gate.
-        if command:
-            _hook_dispatch = resolve_plugin_command_dispatch(
-                name=command,
-                args=event.get_command_args().strip(),
-                surface=CommandSurface.GATEWAY,
-            )
-            if _hook_dispatch.route == "plugin":
-                canonical = _hook_dispatch.handler_key
-
-        if command and canonical and is_gateway_known_command(canonical):
-            _denied = self._check_slash_access(source, canonical)
-            if _denied is not None:
-                return _denied
-
-        # Fire the ``command:<canonical>`` hook for any recognized slash
-        # command — built-in OR plugin-registered. Handlers can return a
-        # dict with ``{"decision": "deny" | "handled" | "rewrite", ...}``
-        # to intercept dispatch before core handling runs. This replaces
-        # the previous fire-and-forget emit(): return values are now
-        # honored, but handlers that return nothing behave exactly as
-        # before (telemetry-style hooks keep working).
-        if command and is_gateway_known_command(canonical):
-            raw_args = event.get_command_args().strip()
-            hook_ctx = {
-                "platform": source.platform.value if source.platform else "",
-                "user_id": source.user_id,
-                "command": canonical,
-                "raw_command": command,
-                "args": raw_args,
-                "raw_args": raw_args,
-            }
-            try:
-                hook_results = await self.hooks.emit_collect(
-                    f"command:{canonical}", hook_ctx
-                )
-            except Exception as _hook_err:
-                logger.debug(
-                    "command:%s hook dispatch failed (non-fatal): %s",
-                    canonical, _hook_err,
-                )
-                hook_results = []
-
-            hook_decision = resolve_command_hook_decision(
-                command=command,
-                hook_results=hook_results,
-            )
-            if hook_decision.action == COMMAND_HOOK_DENY:
-                return hook_decision.response
-            if hook_decision.action == COMMAND_HOOK_HANDLED:
-                return hook_decision.response
-            if hook_decision.action == COMMAND_HOOK_REWRITE:
-                event.text = f"/{hook_decision.command_name} {hook_decision.raw_args}".strip()
-                command = event.get_command()
-                if command:
-                    _cmd_invocation = (
-                        resolve_command_invocation(
-                            name=command,
-                            args=hook_decision.raw_args,
-                            surface=CommandSurface.GATEWAY,
-                        )
-                    )
-                else:
-                    _cmd_invocation = None
-                canonical = (
-                    _cmd_invocation.canonical_name
-                    if _cmd_invocation
-                    else command
-                )
-                if command:
-                    _hook_dispatch = resolve_plugin_command_dispatch(
-                        name=command,
-                        args=hook_decision.raw_args,
-                        surface=CommandSurface.GATEWAY,
-                    )
-                    if _hook_dispatch.route == "plugin":
-                        canonical = _hook_dispatch.handler_key
-
-        from gateway.command_registry import (
-            get_gateway_command_handler,
-            resolve_special_cold_command,
-        )
-
-        _special_telegram_root_lobby = (
-            self._is_telegram_topic_root_lobby(source) if canonical == "new" else False
-        )
-        special_command_decision = resolve_special_cold_command(
-            canonical,
-            command_args=event.get_command_args().strip(),
-            telegram_root_lobby=_special_telegram_root_lobby,
-            telegram_root_new_message=(
-                self._telegram_topic_root_new_message()
-                if _special_telegram_root_lobby
-                else ""
-            ),
-        )
-        if special_command_decision is not None:
-            if special_command_decision.response is not None:
-                return special_command_decision.response
-            if special_command_decision.rewrite_text is not None:
-                try:
-                    event.text = special_command_decision.rewrite_text
-                except Exception:
-                    pass
-            if special_command_decision.confirm_command is not None:
-                async def _do_special_command():
-                    if special_command_decision.confirm_command == "new":
-                        return await self._handle_reset_command(event)
-                    if special_command_decision.confirm_command == "undo":
-                        return await self._handle_undo_command(event)
-                    return None
-
-                return await self._maybe_confirm_destructive_slash(
-                    event=event,
-                    command=special_command_decision.confirm_command,
-                    title=special_command_decision.confirm_title or "",
-                    detail=special_command_decision.confirm_detail or "",
-                    execute=_do_special_command,
-                )
-
-        gateway_handler = get_gateway_command_handler({
-            "topic": self._handle_topic_command,
-            "help": self._handle_help_command,
-            "commands": self._handle_commands_command,
-            "profile": self._handle_profile_command,
-            "whoami": self._handle_whoami_command,
-            "status": self._handle_status_command,
-            "agents": self._handle_agents_command,
-            "platform": self._handle_platform_command,
-            "restart": self._handle_restart_command,
-            "stop": self._handle_stop_command,
-            "reasoning": self._handle_reasoning_command,
-            "fast": self._handle_fast_command,
-            "verbose": self._handle_verbose_command,
-            "footer": self._handle_footer_command,
-            "yolo": self._handle_yolo_command,
-            "model": self._handle_model_command,
-            "codex-runtime": self._handle_codex_runtime_command,
-            "personality": self._handle_personality_command,
-            "kanban": self._handle_kanban_command,
-            "retry": self._handle_retry_command,
-            "sethome": self._handle_set_home_command,
-            "compress": self._handle_compress_command,
-            "usage": self._handle_usage_command,
-            "insights": self._handle_insights_command,
-            "reload-mcp": self._handle_reload_mcp_command,
-            "reload-skills": self._handle_reload_skills_command,
-            "bundles": self._handle_bundles_command,
-            "approve": self._handle_approve_command,
-            "deny": self._handle_deny_command,
-            "update": self._handle_update_command,
-            "debug": self._handle_debug_command,
-            "title": self._handle_title_command,
-            "resume": self._handle_resume_command,
-            "branch": self._handle_branch_command,
-            "rollback": self._handle_rollback_command,
-            "background": self._handle_background_command,
-            "goal": self._handle_goal_command,
-            "subgoal": self._handle_subgoal_command,
-            "voice": self._handle_voice_command,
-        }, canonical)
-        if gateway_handler is not None:
-            return await gateway_handler(event)
-
-        if self._draining:
-            return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
-
-        _cold_dispatch = resolve_cold_command_dispatch(
-            config=self.config,
-            command=command,
-            command_args=event.get_command_args().strip(),
-        )
-        quick_commands = _cold_dispatch.quick_commands if _cold_dispatch else {}
-        skill_cmds = _cold_dispatch.skill_commands if _cold_dispatch else {}
-        command_dispatch = _cold_dispatch.command_dispatch if _cold_dispatch else None
-
-        if command:
-            if command_dispatch and command_dispatch.route == "quick_exec":
-                qcmd = quick_commands.get(command_dispatch.handler_key, {})
-                return await execute_quick_command(
-                    command_name=command,
-                    exec_cmd=qcmd.get("command", ""),
-                    env=os.environ.copy(),
-                )
-            if command_dispatch and command_dispatch.route == "quick_alias":
-                target = (command_dispatch.target or "").strip()
-                if target:
-                    target = target if target.startswith("/") else f"/{target}"
-                    target_command = target.lstrip("/")
-                    user_args = event.get_command_args().strip()
-                    event.text = f"{target} {user_args}".strip()
-                    command = (
-                        target_command.split()[0]
-                        if target_command
-                        else target_command
-                    )
-                    _cold_dispatch = resolve_cold_command_dispatch(
-                        config={},
-                        command=command,
-                        command_args=user_args,
-                        skill_commands_provider=lambda: skill_cmds,
-                    )
-                    command_dispatch = (
-                        _cold_dispatch.command_dispatch
-                        if _cold_dispatch
-                        else None
-                    )
-                else:
-                    return f"Quick command '/{command}' has no target defined."
-            elif command_dispatch and command_dispatch.route == "quick_unsupported":
-                return (
-                    f"Quick command '/{command}' has unsupported type "
-                    "(supported: 'exec', 'alias')."
-                )
-            elif command_dispatch and command_dispatch.route == "unavailable":
-                return unavailable_gateway_command_response(
-                    command_dispatch.invocation.canonical_name
-                )
-
-        # Plugin-registered slash commands
-        if command and command_dispatch and command_dispatch.route == "plugin":
-            try:
-                result = await execute_plugin_command(
-                    handler_key=command_dispatch.handler_key,
-                    raw_args=event.get_command_args().strip(),
-                )
-                return result
-            except Exception as e:
-                logger.debug("Plugin command dispatch failed (non-fatal): %s", e)
-
-        # Skill slash commands: /skill-name loads the skill and sends to agent.
-        # resolve_skill_command_key() handles the Telegram underscore/hyphen
-        # round-trip so /claude_code from Telegram autocomplete still resolves
-        # to the claude-code skill.
-        if command and command_dispatch and command_dispatch.route == "skill_bundle":
-            # Skill bundles take precedence over individual skill commands —
-            # /<bundle> loads multiple skills at once. Mirrors CLI dispatch.
-            _bundle_handled = False
-            try:
-                bundle_result = build_bundle_invocation(
-                    bundle_key=command_dispatch.handler_slash_key,
-                    user_instruction=event.get_command_args().strip(),
-                    task_id=_quick_key,
-                )
-                if bundle_result:
-                    event.text = bundle_result.message
-                    _bundle_handled = True
-                    if bundle_result.missing:
-                        logger.info(
-                            "Bundle %s skipped missing skills: %s",
-                            command_dispatch.handler_slash_key,
-                            ", ".join(bundle_result.missing),
-                        )
-                    # Fall through to normal message processing with bundle
-                    # content.
-            except Exception as exc:
-                logger.debug("Bundle dispatch failed (non-fatal): %s", exc)
-
-        if (
-            command
-            and command_dispatch
-            and command_dispatch.route in {"skill", "unknown"}
-            and not locals().get("_bundle_handled", False)
-        ):
-            try:
-                skill_decision = build_skill_invocation_decision(
-                    command_dispatch=command_dispatch,
-                    command=command,
-                    skill_commands=skill_cmds,
-                    platform_value=source.platform.value if source.platform else None,
-                    user_instruction=event.get_command_args().strip(),
-                    task_id=_quick_key,
-                    unavailable_skill_checker=_check_unavailable_skill,
-                    known_command_checker=is_gateway_known_command,
-                )
-                if skill_decision.response is not None:
-                    if skill_decision.response.startswith("Unknown command"):
-                        logger.warning(
-                            "Unrecognized slash command /%s from %s — "
-                            "replying with unknown-command notice",
-                            command,
-                            source.platform.value if source.platform else "?",
-                        )
-                    return skill_decision.response
-                if skill_decision.message:
-                    event.text = skill_decision.message
-                    # Fall through to normal message processing with skill content
-            except Exception as e:
-                logger.debug("Skill command check failed (non-fatal): %s", e)
-        
-        # Pending exec approvals are handled by /approve and /deny commands above.
-        # No bare text matching — "yes" in normal conversation must not trigger
-        # execution of a dangerous command.
-
-        if self._is_telegram_topic_root_lobby(source):
-            # Debounce the lobby reminder so a user who forgets about
-            # topic mode and fires ten prompts doesn't get ten copies.
-            if self._should_send_telegram_lobby_reminder(source):
-                return self._telegram_topic_root_lobby_message()
-            return None
+        if _cold_route.outcome != ColdRouteOutcome.WARM_AGENT:
+            return _cold_route.response
 
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there

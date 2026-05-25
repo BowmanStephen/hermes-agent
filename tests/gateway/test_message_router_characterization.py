@@ -70,6 +70,18 @@ def _make_runner():
         emit_collect=AsyncMock(return_value=[]),
         loaded_hooks=False,
     )
+    from gateway.event_bus import EventBus
+    from gateway.message_router import MessageRouter
+
+    runner._event_bus = EventBus()
+    runner._message_router = MessageRouter(
+        runner.config,
+        runner._event_bus,
+        runner.session_store,
+    )
+    runner._gateway_cold_command_handlers = lambda: {
+        "approve": runner._handle_approve_command,
+    }
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = True
     runner.pairing_store._is_rate_limited.return_value = False

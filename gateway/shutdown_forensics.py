@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -248,6 +249,20 @@ def spawn_async_diagnostic(
     except OSError:
         return None
 
+    timeout_bin = shutil.which("timeout")
+    bash_bin = shutil.which("bash") or "/bin/bash"
+    if not Path(bash_bin).exists():
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    cmd = (
+        [timeout_bin, f"{timeout_seconds:.0f}", bash_bin, "-c", script]
+        if timeout_bin
+        else [bash_bin, "-c", script]
+    )
+
     try:
         # Detach from our process group so the subprocess survives even
         # if systemd kills our cgroup with KillMode=control-group (which
@@ -255,7 +270,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            cmd,
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

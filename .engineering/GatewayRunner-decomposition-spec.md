@@ -100,6 +100,17 @@ Local fork has composition slices that align with this spec:
 | `gateway/agent_runtime.py` | ~125 | `AgentRunner` | ✓ Yes — session model/runtime resolution and session-scoped model override application |
 | `gateway/agent_runner.py` | ~370 | `AgentRunner` | ✓ Yes — per-turn runtime route construction, agent runtime config loading, model-switch intent detection, running-agent state release, cache signatures, running-agent snapshots, cached-agent turn initialization, and cache eviction/idle-sweep decisions |
 | `gateway/agent_shutdown.py` | ~140 | `AgentRunner` | ✓ Yes — shutdown-time active-agent draining, shutdown interruption, finalization hooks, and agent resource cleanup |
+| `gateway/agent_execution_runtime.py` | ~2,060 | `AgentRunner` | ✓ Yes — transitional owner for the `_run_agent` body: proxy delegation, agent construction, progress/status callbacks, streaming, approvals, interruption handling, queued follow-ups, and cleanup. Still must be split below the final 400-line object gate. |
+| `gateway/message_agent_runtime.py` | ~1,120 | `AgentRunner` | ✓ Yes — transitional owner for the agent-turn message handler body: session creation, topic binding, context setup, transcript persistence, final response handling, and cleanup. Still must be split below the final 400-line object gate. |
+| `gateway/stop_runtime.py` | ~375 | `GatewayRuntime` | ✓ Yes — stop/shutdown lifecycle sequencing, drain-time resume-pending markers, timeout interruption, adapter disconnect, cache teardown, clean-shutdown markers, and service-restart exit state |
+| `gateway/restart_runtime.py` | ~250 | `GatewayRuntime` / `SessionManager` | ✓ Yes — restart failure counters, stuck-loop suspension, detached restart launch, and restart-interrupted session auto-resume scheduling |
+| `gateway/session_handoff.py` | ~250 | `SessionManager` | ✓ Yes — pending CLI-to-gateway handoff polling and one-row handoff execution |
+| `gateway/session_expiry.py` | ~190 | `SessionManager` | ✓ Yes — expired-session finalization, cached-agent cleanup, idle-agent sweep, and stale SessionStore pruning |
+| `gateway/kanban_goal_continuation.py` | ~75 | `KanbanWatchers` | ✓ Yes — synthetic goal-continuation event detection and queue cleanup |
+| `gateway/kanban_notifier.py` | ~420 | `KanbanWatchers` | ✓ Yes — Kanban terminal-event notifier, cursor advance/rewind, and subscription cleanup |
+| `gateway/kanban_artifacts.py` | ~125 | `KanbanWatchers` | ✓ Yes — Kanban completion artifact uploads |
+| `gateway/kanban_dispatcher.py` | ~435 | `KanbanWatchers` | ✓ Yes — embedded Kanban dispatcher loop, health telemetry, stale-task handling, and auto-decomposition |
+| `gateway/agent_progress.py` | ~300 | `AgentRunner` | ✓ Yes — gateway tool-progress editable-bubble delivery, overflow rollover, dedup/reset events, stale-run draining, and cleanup message-id tracking |
 | `gateway/background_task_runner.py` | ~310 | `AgentRunner` | ✓ Yes — `/background` task execution, runtime/toolset resolution, attachment vision enrichment, temporary agent cleanup, and completion delivery |
 | `gateway/proxy_runner.py` | ~300 | `AgentRunner` (proxy mode) | ✓ Yes — `_run_agent_via_proxy` |
 | `gateway/message_enrichment.py` | ~120 | `AgentRunner` | ✓ Yes — image input-mode routing and automatic vision enrichment of inbound image attachments |
@@ -110,9 +121,19 @@ Local fork has composition slices that align with this spec:
 | `gateway/voice_mode_manager.py` | ~140 | `VoiceHandler` | ✓ Yes — voice-mode keying, persistence, and adapter auto-TTS state synchronization |
 | `gateway/active_session_routing.py` | ~315 | `MessageRouter` | ✓ Yes — pending slash-confirm routing, unauthorized-DM behavior resolution, active-session command/follow-up policy, re-exported by `gateway/message_router.py` |
 | `gateway/active_session_busy.py` | ~300 | `MessageRouter` | ✓ Yes — active-session busy follow-up auth, drain, queue/steer/interrupt, busy-ack, and onboarding policy |
+| `gateway/message_dispatch_runtime.py` | ~1,105 | `MessageRouter` | ✓ Yes — transitional owner for the inbound message dispatch body: pre-dispatch hooks, auth, slash command routing, active-session queue/interrupt policy, pending sentinels, and handoff into the agent-turn runtime. Still must be split below the final 400-line object gate. |
 | `gateway/message_router.py` | ~330 | `MessageRouter` | Partial — hosts the cold-command router prototype and re-exports active-session routing helpers for compatibility |
 | `gateway/cold_command_router.py` | ~365 | `MessageRouter` (cold command path) | ✓ Yes — quick-command alias expansion/execution, cold dispatch metadata, command hook decisions, plugin command execution, skill/bundle invocation loading, unavailable/unknown command responses |
-| `gateway/command_registry.py` | ~125 | `CommandRegistry` | ✓ Yes — cold-path explicit handler-map validation plus special `/new`, `/undo`, and cold `/steer` command decisions |
+| `gateway/command_registry.py` | ~145 | `CommandRegistry` | ✓ Yes — cold-path explicit handler-map validation plus special `/new`, `/undo`, cold `/steer` command decisions, and the composed command-handler registry shim |
+| `gateway/command_handlers/` | package | `CommandRegistry` | Transitional — slash-command handler bodies deleted from `run.py` and delegated through `GatewayCommandService`; all current command-handler modules are below the 400-line object gate |
+| `gateway/command_handlers/core_*.py` | ~230-345 | `CommandRegistry` | ✓ Yes — core reset/help, status, agents, platform, restart, and stop command groups split behind `CoreGatewayCommands` |
+| `gateway/command_handlers/model_switch.py` | ~370 | `CommandRegistry` | ✓ Yes — `/model` command parsing, session/global persistence, provider validation, and active-session model switch confirmation |
+| `gateway/command_handlers/runtime_modes.py` | ~240 | `CommandRegistry` | ✓ Yes — Codex runtime, personality, and reasoning command handlers |
+| `gateway/command_handlers/display_modes.py` | ~360 | `CommandRegistry` | ✓ Yes — fast/yolo/verbose/footer/compress display and behavior toggles |
+| `gateway/command_handlers/operations_*.py` | ~235-300 | `CommandRegistry` | ✓ Yes — usage/diagnostics, MCP/skills/bundle reloads, and approval confirmation helpers split behind `OperationsGatewayCommands` |
+| `gateway/command_handlers/session_*.py` | ~215 | `CommandRegistry` | ✓ Yes — retry/undo/home/rollback/title and background/resume/branch command groups split behind `SessionGatewayCommands` |
+| `gateway/command_handlers/telegram_topic_*.py` | ~175-245 | `CommandRegistry` | ✓ Yes — Telegram topic setup/rename and topic command/restore groups split behind `TelegramTopicGatewayCommands` |
+| `gateway/command_handlers/voice_*.py` | ~175-265 | `CommandRegistry` | ✓ Yes — voice control/channel commands and voice input/output delivery split behind `VoiceGatewayCommands` |
 | `gateway/session_manager.py` | ~230 | `SessionManager` | ✓ Yes — session-key resolution, live `SessionSource` cache helpers, run-generation token helpers, session interruption/clear flow, session-boundary control-state cleanup, and cached-agent eviction |
 | `gateway/session_info.py` | ~135 | `SessionManager` | ✓ Yes — current session/model info formatting for gateway commands, including provider, context length, and local endpoint display |
 | `gateway/telegram_topic_manager.py` | ~350 | `DeliveryManager` | ✓ Yes — Telegram topic predicates, user guidance text, cooldown gates, binding persistence, thread recovery, title sanitization, auto-rename disable policy, root status rendering, and topic-mode disable semantics |
@@ -123,7 +144,7 @@ Local fork has composition slices that align with this spec:
 | `gateway/platform_reconnect.py` | ~230 | `PlatformManager` | ✓ Yes — reconnect watcher loop and per-platform reconnect-attempt decisions, including handler rebinding, success/fatal/retry classification, backoff, and circuit-breaker pause triggers |
 | `gateway/platform_factory.py` | ~260 | `PlatformManager` | ✓ Yes — adapter factory resolution, plugin-registry precedence, built-in adapter creation, and gateway-context injection |
 
-Dead `run_helpers.py` and `command_handlers.py` extractions were intentionally removed. They moved code without a real ownership boundary and left `GatewayRunner` carrying the same complexity. Future extractions must delete the original method body from `run.py`, provide an explicit dependency surface, and include characterization tests at the new seam.
+Dead `run_helpers.py` and earlier command-handler attempts were intentionally removed. They moved code without a real ownership boundary and left `GatewayRunner` carrying the same complexity. The current `gateway/command_handlers/` package is a strangler slice because the original command bodies are deleted from `run.py` and command dispatch uses an explicit service map; current command service modules are below the final 400-line object gate.
 
 ## Risk Assessment
 
@@ -143,9 +164,12 @@ Dead `run_helpers.py` and `command_handlers.py` extractions were intentionally r
 3. **Delete, don't wrap** — every migrated behavior must delete the original
    `GatewayRunner` body. Helper modules that leave ownership and dispatch on
    `GatewayRunner` do not count.
-4. **Meet the line-count gate** — the next slice must reduce
-   `gateway/run.py` below 12,000 lines. Final cutover target remains
-   `GatewayRunner` < 500 lines.
+4. **Delete more GatewayRunner bodies** — `gateway/run.py` is now below the
+   4,800-line gate, and command-handler modules are below the 400-line object
+   rule. The next useful slice should either split the transitional
+   `agent_execution_runtime.py` / `message_agent_runtime.py` /
+   `message_dispatch_runtime.py` modules below the object gate or remove
+   another cohesive body cluster from `gateway/run.py`.
 5. **Decide** — if a decision requires broad runner state, leave it in place
    and update `GatewayRunner-method-map.md` with the coupling before extracting.
 

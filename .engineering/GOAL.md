@@ -40,6 +40,7 @@ Decompose GatewayRunner into composed domain objects (NOT mixins):
 - Next decomposition slice must reduce `gateway/run.py` below 12,000 lines.
 - Future slices must delete migrated bodies from `GatewayRunner`; helper modules
   that leave ownership and dispatch on `GatewayRunner` do not count.
+- Current structural test keeps `gateway/run.py` below 4,800 lines.
 - Final cutover target remains `GatewayRunner` < 500 lines.
 
 ## Checkpoint: Phase A Ready
@@ -55,6 +56,17 @@ The first composition slices are in place:
 - `gateway/agent_runtime.py` owns session model/runtime resolution and session-scoped model override application.
 - `gateway/agent_runner.py` owns per-turn agent runtime route construction, agent runtime config loading, model-switch intent detection, running-agent state release, agent cache signatures, running-agent snapshots, cached-agent turn initialization, and cache eviction/idle-sweep decisions.
 - `gateway/agent_shutdown.py` owns shutdown-time active-agent draining, shutdown interruption, finalization hooks, and agent resource cleanup.
+- `gateway/agent_execution_runtime.py` owns the current `_run_agent` body for proxy delegation, agent construction, progress/status callbacks, streaming, approvals, interruption handling, queued follow-ups, and cleanup. It is a transitional extraction and still needs to be split below the final composed-object gate.
+- `gateway/message_agent_runtime.py` owns the current agent-turn message handler body for session creation, topic binding, context setup, transcript persistence, final response handling, and turn cleanup. It is a transitional extraction and still needs to be split below the final composed-object gate.
+- `gateway/stop_runtime.py` owns gateway stop/shutdown lifecycle sequencing, restart flags, drain timeout interruption, adapter disconnect, cache teardown, clean-shutdown markers, and service-restart exit state.
+- `gateway/restart_runtime.py` owns restart failure-count persistence, stuck-loop suspension, detached restart command launching, and restart-interrupted session auto-resume scheduling.
+- `gateway/session_handoff.py` owns pending CLI-to-gateway handoff polling and single-row handoff execution.
+- `gateway/session_expiry.py` owns expired-session finalization, cached-agent cleanup, idle cache sweeping, and stale SessionStore pruning.
+- `gateway/kanban_goal_continuation.py` owns synthetic goal-continuation queue detection and cleanup.
+- `gateway/kanban_notifier.py` owns Kanban terminal-event notification polling, cursor advance/rewind, and subscription cleanup.
+- `gateway/kanban_artifacts.py` owns Kanban completion artifact upload routing.
+- `gateway/kanban_dispatcher.py` owns the embedded Kanban dispatcher watcher loop.
+- `gateway/agent_progress.py` owns gateway tool-progress message delivery, including editable progress bubbles, overflow rollover, dedup/reset events, stale-run draining, and cleanup message-id tracking.
 - `gateway/background_task_runner.py` owns `/background` task execution, including runtime/tool resolution, image enrichment, temporary agent construction, executor handoff, cleanup, and result/media delivery.
 - `gateway/message_enrichment.py` owns image input-mode routing and automatic vision enrichment of inbound image attachments.
 - `gateway/message_authorization.py` owns inbound source authorization, including platform allow-all flags, allowlists, pairing approvals, bot/role bypasses, plugin auth envs, and WhatsApp alias expansion.
@@ -65,7 +77,9 @@ The first composition slices are in place:
 - `gateway/active_session_routing.py` owns pending slash-confirm reply routing, unauthorized-DM behavior resolution, active-session command policy, and active-session follow-up policy; `gateway/message_router.py` re-exports that compatibility surface while hosting the cold-command router prototype.
 - `gateway/active_session_busy.py` owns active-session busy follow-up handling, including auth drop, restart drain, queue/steer/interrupt side effects, busy-ack status text, debounce, thread reply metadata, and first-touch onboarding.
 - `gateway/cold_command_router.py` owns quick-command alias expansion/execution, cold command dispatch metadata, command hook decisions, plugin command execution, skill/bundle invocation loading, and unavailable/unknown command responses.
+- `gateway/message_dispatch_runtime.py` owns the current inbound message dispatch body for pre-dispatch hooks, auth, slash command routing, active-session queue/interrupt policy, pending sentinels, and handoff into the agent-turn runtime. It is a transitional extraction and still needs to be split below the final composed-object gate.
 - `gateway/command_registry.py` owns the cold-path gateway command handler table, explicit handler-map validation, and special `/new`, `/undo`, and cold `/steer` command decisions.
+- `gateway/command_handlers/` is the current strangler package for slash-command handler bodies. `GatewayRunner` keeps compatibility wrappers and delegates through `GatewayCommandService`; all current command-handler modules are split below the 400-line composed-object gate.
 - `gateway/session_manager.py` owns session-key resolution, live `SessionSource` cache helpers, run-generation token helpers, session interruption/clear flow, session-boundary control-state cleanup, and cached-agent eviction.
 - `gateway/session_info.py` owns current session/model info formatting for gateway commands, including provider, context length, and local endpoint display.
 - `gateway/telegram_topic_manager.py` owns Telegram topic-mode predicates, user guidance text, cooldown gates, topic binding persistence, topic-thread recovery, title sanitization, auto-rename disable policy, root status rendering, and topic-mode disable semantics.
@@ -83,6 +97,9 @@ The first composition slices are in place:
 - `GatewayRunner._format_session_info` is now a compatibility wrapper around the SessionManager session-info formatter.
 - `GatewayRunner._resolve_session_agent_runtime`, `_resolve_turn_agent_config`, `_load_service_tier`, `_load_provider_routing`, `_load_fallback_model`, `_apply_session_model_override`, `_is_intentional_model_switch`, `_release_running_agent_state`, `_extract_cache_busting_config`, `_agent_config_signature`, `_snapshot_running_agents`, `_init_cached_agent_for_turn`, `_release_evicted_agent_soft`, `_enforce_agent_cache_cap`, and `_sweep_idle_cached_agents` are compatibility wrappers around AgentRunner helpers.
 - `GatewayRunner._drain_active_agents`, `_interrupt_running_agents`, `_finalize_shutdown_agents`, and `_cleanup_agent_resources` are compatibility wrappers around AgentRunner shutdown helpers.
+- `GatewayRunner._handle_message_with_agent` is now a compatibility wrapper around the AgentRunner message-runtime service.
+- `GatewayRunner.stop` is now a compatibility wrapper around the GatewayRuntime stop service.
+- `GatewayRunner._run_agent` is now a compatibility wrapper around the AgentRunner execution-runtime service.
 - `GatewayRunner._run_background_task` is a compatibility wrapper around the AgentRunner background-task helper.
 - `GatewayRunner._decide_image_input_mode` and `_enrich_message_with_vision` are compatibility wrappers around AgentRunner message-enrichment helpers.
 - `GatewayRunner._run_process_watcher` is a compatibility wrapper around the AgentRunner process-watcher helper.
@@ -99,5 +116,8 @@ The first composition slices are in place:
 - `GatewayRunner._handle_active_session_busy_message` is now a compatibility wrapper around the MessageRouter busy-follow-up helper.
 - `GatewayRunner._handle_message` delegates cold-path quick-command expansion/execution, dispatch setup, command hook interpretation, plugin command execution, and skill/bundle invocation loading.
 - `GatewayRunner._handle_message` delegates cold-path special command decisions and gateway command handler lookup to `gateway.command_registry`.
+- `GatewayRunner._handle_message` is now a compatibility wrapper around the MessageRouter dispatch-runtime service.
+- `GatewayRunner._handle_message` now resolves command dispatch from `GatewayCommandService.handler_map()`, and the concrete slash-command bodies have been removed from `gateway/run.py`.
+- The staged `gateway/run.py` line count is 4,690 lines; the final target remains below 500 lines.
 
-Next task: move the next AgentRunner execution helper or extract another MessageRouter/DeliveryManager decision cluster.
+Next task: move the next GatewayRunner body cluster out of `gateway/run.py` so the composition root keeps shrinking toward the final 500-line target.

@@ -111,6 +111,24 @@ GATEWAY_HANDLER_METHODS: dict[str, str] = {
 }
 
 
+class CommandHandlerRegistry:
+    """Small explicit command-handler table for composed gateway routers."""
+
+    def __init__(self, handlers: Mapping[str, Callable[[Any], Any]] | None = None) -> None:
+        self._handlers: dict[str, Callable[[Any], Any]] = dict(handlers or {})
+
+    def register(self, canonical: str, handler: Callable[[Any], Any]) -> None:
+        self._handlers[canonical] = handler
+
+    def get(self, canonical: Optional[str]) -> Optional[Callable[[Any], Any]]:
+        if not canonical:
+            return None
+        return self._handlers.get(canonical)
+
+    def names(self) -> frozenset[str]:
+        return frozenset(self._handlers)
+
+
 def get_gateway_command_handler(
     handlers: Mapping[str, Any],
     canonical: Optional[str],

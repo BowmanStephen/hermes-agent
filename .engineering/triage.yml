@@ -1,0 +1,19 @@
+labels:
+  types:
+    - bug
+    - feature
+    - chore
+    - docs
+    - question
+    - security
+    - performance
+  statuses:
+    - needs-info
+    - ready
+    - blocked
+    - in-progress
+  priorities:
+    - p0
+    - p1
+    - p2
+    - p3

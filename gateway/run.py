@@ -2464,7 +2464,7 @@ class GatewayRunner:
         await notify_active_sessions_of_shutdown(
             active_session_keys=self._snapshot_running_agents(),
             adapters=self.adapters,
-            config=self.config,
+            config=getattr(self, "config", GatewayConfig()),
             restart_requested=self._restart_requested,
             session_store=getattr(self, "session_store", None),
             get_cached_session_source=self._get_cached_session_source,

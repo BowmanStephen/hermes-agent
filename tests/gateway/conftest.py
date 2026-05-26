@@ -454,8 +454,14 @@ def pytest_configure(config):
 def _patch_gateway_handle_message_for_partial_runners() -> None:
     """Partial GatewayRunner fixtures skip __init__; wire router before _handle_message."""
     import functools
+    import os
 
-    import gateway.run as gateway_run
+    env_before = os.environ.copy()
+    try:
+        import gateway.run as gateway_run
+    finally:
+        os.environ.clear()
+        os.environ.update(env_before)
 
     from tests.gateway.runner_wiring import wire_message_router
 
@@ -470,4 +476,3 @@ def _patch_gateway_handle_message_for_partial_runners() -> None:
 
 
 _patch_gateway_handle_message_for_partial_runners()
-

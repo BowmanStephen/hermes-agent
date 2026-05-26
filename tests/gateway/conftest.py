@@ -450,3 +450,21 @@ def pytest_configure(config):
         else:
             cache_file.write_text("clean", encoding="utf-8")
 
+
+def _patch_gateway_handle_message_for_partial_runners() -> None:
+    """Partial GatewayRunner fixtures skip __init__; wire router before _handle_message."""
+    import gateway.run as gateway_run
+
+    from tests.gateway.runner_wiring import wire_message_router
+
+    _original = gateway_run.GatewayRunner._handle_message
+
+    async def _handle_message(self, event):
+        wire_message_router(self)
+        return await _original(self, event)
+
+    gateway_run.GatewayRunner._handle_message = _handle_message
+
+
+_patch_gateway_handle_message_for_partial_runners()
+

@@ -66,3 +66,29 @@
   owns the voice-mode map, its JSON persistence, and adapter TTS-flag sync,
   behind `get` / `set(key, mode, adapter)` / `sync_to_adapter`. Removes the
   mutate→persist→sync triad currently duplicated at ~6 command sites.
+
+## Fork integration (BowmanStephen/hermes-agent)
+
+- **upstream** — `NousResearch/hermes-agent` (`origin` remote). Source of upstream
+  features; not where Dale fork work lands first.
+_Avoid_: origin (when meaning “my fork”), main repo
+
+- **fork remote** — `BowmanStephen/hermes-agent` (`fork` remote). Stephen’s GitHub
+  copy; default branch `main`; target for pushes and pull requests.
+_Avoid_: GitHub, my repo (ambiguous)
+
+- **integration branch** — `feat/gateway-event-bus` on the fork remote. All
+  gateway-decomposition work lands here until deliberately merged into fork
+  `main`. Agents must not treat `codex/Consolidation` or fork `main` as the
+  active timeline without an explicit decision.
+_Avoid_: main (until integration is deliberate), codex/Consolidation (parallel
+  refactor line)
+
+- **pull request** — draft PR on the fork merges `feat/gateway-event-bus` into
+  fork `main` when gateway smoke-test passes. Opening a PR is not the same as
+  merging; agents keep committing to the integration branch until merge.
+_Avoid_: merge (when meaning “open a PR”), PR merge (when meaning local git merge)
+
+- **local merge** — combining an integration branch into another branch on the
+  Mac with `git merge`, with or without a pull request.
+_Avoid_: syncing, updating GitHub

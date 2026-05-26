@@ -58,6 +58,13 @@ from agent.async_utils import safe_schedule_threadsafe
 from agent.i18n import t
 from hermes_cli.config import cfg_get
 
+from gateway.event_bus import event_bus
+from gateway.message_router import MessageRouter
+from gateway.message_agent_runtime import GatewayMessageAgentRuntime
+from gateway.message_dispatch_runtime import GatewayMessageDispatchRuntime
+from gateway.command_registry import CommandHandlerRegistry
+
+
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
 # long-lived gateways (each AIAgent holds LLM clients, tool schemas,
@@ -907,8 +914,6 @@ from gateway.session_manager import (
     resolve_session_key_for_source,
 )
 from gateway.session_info import format_session_info
-from gateway.message_agent_runtime import GatewayMessageAgentRuntime
-from gateway.message_dispatch_runtime import GatewayMessageDispatchRuntime
 from gateway.agent_execution_runtime import GatewayAgentExecutionRuntime
 from gateway.kanban_artifacts import KanbanArtifactDelivery
 from gateway.kanban_dispatcher import KanbanDispatcherWatcher
@@ -1443,6 +1448,15 @@ class GatewayRunner:
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
         self.delivery_router = DeliveryRouter(self.config)
+
+        # Initialize event bus and message router for decoupled command handling
+        self._event_bus = event_bus
+        self._message_router = MessageRouter(
+            config=self.config,
+            event_bus=self._event_bus,
+            session_store=self.session_store
+        )
+        self._command_registry = CommandHandlerRegistry()
         self._running = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
@@ -3360,6 +3374,14 @@ class GatewayRunner:
         return await self._gateway_commands._handle_kanban_command(event)
 
     async def _handle_status_command(self, event: MessageEvent) -> str:
+        event_bus = getattr(self, "_event_bus", None)
+        if event_bus is not None:
+            await event_bus.emit("status_command_received", {
+                "event": event,
+                "session_key": getattr(event, "source", None) and self._session_key_for_source(event.source),
+                "timestamp": time.time(),
+            })
+        # Delegate to existing service while we migrate
         return await self._gateway_commands._handle_status_command(event)
 
     async def _handle_agents_command(self, event: MessageEvent) -> str:
@@ -3378,9 +3400,30 @@ class GatewayRunner:
         return self._gateway_commands._is_stale_restart_redelivery(event)
 
     async def _handle_help_command(self, event: MessageEvent) -> str:
+        # VERTICAL SLICE: Route through MessageRouter instead of GatewayCommandService
+        # This demonstrates the new event-driven architecture
+        event_dict = {
+            "text": "/help",
+            "platform": getattr(event.source, "platform", None).value if event.source else "unknown",
+            "user_id": getattr(event.source, "user_id", None) if event.source else None,
+        }
+        result = await self._message_router.handle_message(event_dict)
+        if result and "response" in result:
+            return result["response"]
+        # Fallback to existing service while we migrate
         return await self._gateway_commands._handle_help_command(event)
 
     async def _handle_commands_command(self, event: MessageEvent) -> str:
+        # VERTICAL SLICE: Route through MessageRouter
+        event_dict = {
+            "text": "/commands",
+            "platform": getattr(event.source, "platform", None).value if event.source else "unknown",
+            "user_id": getattr(event.source, "user_id", None) if event.source else None,
+        }
+        result = await self._message_router.handle_message(event_dict)
+        if result and "response" in result:
+            return result["response"]
+        # Fallback to existing service
         return await self._gateway_commands._handle_commands_command(event)
 
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:

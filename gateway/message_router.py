@@ -143,6 +143,7 @@ class MessageRouter:
         # Status commands
         self._cold_commands.register("/status", self._handle_status)
         self._cold_commands.register("/health", self._handle_status)
+        self._cold_commands.register("/help", self._handle_help)
 
         # Session commands
         self._cold_commands.register("/new", self._handle_new_session)
@@ -211,6 +212,25 @@ class MessageRouter:
             "platform": platform,
             "session_active": session_id is not None,
             "session_id": session_id,
+        }
+
+        await self._event_bus.emit("command_response", {
+            "event": event,
+            "response": result,
+        })
+
+        return result
+
+    async def _handle_help(
+        self,
+        event: Dict[str, Any],
+        session_store: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Handle /help by exposing the registered cold command set."""
+        result = {
+            "type": "help",
+            "commands": sorted(self._cold_commands.names()),
         }
 
         await self._event_bus.emit("command_response", {

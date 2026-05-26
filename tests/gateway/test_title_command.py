@@ -202,11 +202,10 @@ class TestTitleInHelp:
         assert "/title" in result
 
     def test_title_is_known_command(self):
-        """The /title command is in the _known_commands set."""
-        from gateway.run import GatewayRunner
-        import inspect
-        source = inspect.getsource(GatewayRunner._handle_message)
-        assert '"title"' in source
+        """The /title command is registered for cold-path dispatch."""
+        from gateway.command_registry import GATEWAY_HANDLER_METHODS
+
+        assert "title" in GATEWAY_HANDLER_METHODS
 
 
 # ---------------------------------------------------------------------------

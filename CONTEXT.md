@@ -105,8 +105,10 @@ _Avoid_: merge (when meaning “open a PR”), PR merge (when meaning local git 
   Mac with `git merge`, with or without a pull request.
 _Avoid_: syncing, updating GitHub
 
-- **upstream sync** — deliberately deferred while gateway decomposition lands on
-  the fork (PR #21). `origin/main` (~332 commits ahead of fork `main`) is a
-  separate pass after smoke-test; do not block integration work on rebasing now.
-_Avoid_: “catch up to Nous” (during PR #21), rebase (when meaning upstream —
-  use **upstream sync**)
+- **upstream sync** — two-phase, never mixed with gateway decomposition commits.
+  **Phase 1 (now):** defer — ship PR #21 on the fork without touching
+  `origin/main`. **Phase 2 (after PR #21 smoke-test + merge):** separate PR —
+  merge `origin/main` into fork `main`, then rebase `feat/gateway-event-bus`
+  (or the next integration branch) onto updated fork `main`. Not a rebase of
+  integration onto upstream before fork `main` catches up.
+_Avoid_: “catch up to Nous” (during PR #21), mixing upstream merge into PR #21

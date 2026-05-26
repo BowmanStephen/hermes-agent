@@ -1,14 +1,12 @@
 """Tests for gateway proxy mode — forwarding messages to a remote API server."""
 
-import asyncio
-import json
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from gateway.config import Platform, StreamingConfig
 from gateway.platforms.base import resolve_proxy_url
+from gateway.proxy_runner import run_agent_via_proxy
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
@@ -91,6 +89,17 @@ def _patch_aiohttp(session):
     return patch(
         "aiohttp.ClientSession",
         return_value=session,
+    )
+
+
+async def _run_proxy(runner, **kwargs):
+    source = kwargs["source"]
+    return await run_agent_via_proxy(
+        proxy_url=runner._get_proxy_url(),
+        adapter=runner.adapters.get(source.platform),
+        is_session_run_current=runner._is_session_run_current,
+        streaming_config=runner.config.streaming,
+        **kwargs,
     )
 
 
@@ -189,28 +198,51 @@ class TestRunAgentProxyDispatch:
             "tools": [],
         }
 
-        runner._run_agent_via_proxy = AsyncMock(return_value=expected_result)
+        proxy_call = AsyncMock(return_value=expected_result)
 
-        result = await runner._run_agent(
-            message="hi",
-            context_prompt="",
-            history=[],
-            source=source,
-            session_id="test-session-123",
-            session_key="test-key",
-            run_generation=7,
-        )
+        with patch("gateway.proxy_runner.run_agent_via_proxy", proxy_call):
+            result = await runner._run_agent(
+                message="hi",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="test-session-123",
+                session_key="test-key",
+                run_generation=7,
+            )
 
         assert result["final_response"] == "Hello from remote!"
-        runner._run_agent_via_proxy.assert_called_once()
-        assert runner._run_agent_via_proxy.call_args.kwargs["run_generation"] == 7
+        proxy_call.assert_called_once()
+        assert proxy_call.call_args.kwargs["run_generation"] == 7
+        assert "is_session_run_current" in proxy_call.call_args.kwargs
+        assert "is_session_current" not in proxy_call.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_run_agent_skips_proxy_when_not_configured(self, monkeypatch):
         monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
         runner = _make_runner()
 
-        runner._run_agent_via_proxy = AsyncMock()
+        proxy_call = AsyncMock()
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with patch("gateway.proxy_runner.run_agent_via_proxy", proxy_call):
+                try:
+                    await runner._run_agent(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=_make_source(),
+                        session_id="test-session",
+                    )
+                except Exception:
+                    pass  # Expected — bare runner can't create a real agent
+
+        proxy_call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gateway_runner_no_longer_exposes_proxy_wrapper(self, monkeypatch):
+        monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
+        runner = _make_runner()
 
         with patch("gateway.run._load_gateway_config", return_value={}):
             try:
@@ -224,7 +256,7 @@ class TestRunAgentProxyDispatch:
             except Exception:
                 pass  # Expected — bare runner can't create a real agent
 
-        runner._run_agent_via_proxy.assert_not_called()
+        assert not hasattr(runner, "_run_agent_via_proxy")
 
 
 class TestRunAgentViaProxy:
@@ -250,7 +282,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await _run_proxy(
+                        runner,
                         message="How are you?",
                         context_prompt="You are helpful.",
                         history=[
@@ -296,7 +329,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await _run_proxy(
+                        runner,
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -327,7 +361,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with patch("aiohttp.ClientSession", return_value=_ErrorSession()):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await _run_proxy(
+                        runner,
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -360,7 +395,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    await runner._run_agent_via_proxy(
+                    await _run_proxy(
+                        runner,
                         message="tell me more",
                         context_prompt="",
                         history=history,
@@ -391,7 +427,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await _run_proxy(
+                        runner,
                         message="hi",
                         context_prompt="",
                         history=[{"role": "user", "content": "prev"}, {"role": "assistant", "content": "ok"}],
@@ -430,7 +467,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await _run_proxy(
+                        runner,
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -460,7 +498,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    await runner._run_agent_via_proxy(
+                    await _run_proxy(
+                        runner,
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -486,7 +525,8 @@ class TestRunAgentViaProxy:
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    await runner._run_agent_via_proxy(
+                    await _run_proxy(
+                        runner,
                         message="hello",
                         context_prompt="",
                         history=[],

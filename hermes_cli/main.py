@@ -9373,7 +9373,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "cron", "curator", "dashboard", "debug", "doctor",
-        "dump", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "fallback", "gateway", "git", "hooks", "import", "insights",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "postinstall", "profile", "proxy",
         "send", "sessions", "setup",
@@ -9763,6 +9763,25 @@ def main():
         help="Remove all fallback entries",
     )
     fallback_parser.set_defaults(func=cmd_fallback)
+
+    # ── hermes git: guided, read-only git-state report (issue #10, slice 1) ──
+    from hermes_cli.git_maintenance import cmd_git_status
+
+    git_parser = subparsers.add_parser(
+        "git",
+        help="Plain-language git state report + safe next steps (read-only)",
+        description=(
+            "Show your repository state in plain language: what's saved, what's "
+            "only on this computer, whether you're behind upstream Hermes, and the "
+            "single safest next step. Read-only — it changes nothing."
+        ),
+    )
+    git_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Machine-readable output (for agents)",
+    )
+    git_parser.set_defaults(func=cmd_git_status)
 
     # =========================================================================
     # secrets command — external secret managers (currently: Bitwarden)

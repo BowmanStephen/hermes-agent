@@ -1138,6 +1138,7 @@ def cronjob(
     monitor_url: Optional[str] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
+    home: Optional[Union[str, Path]] = None,
 ) -> str:
     """Unified cron job management tool."""
     del task_id  # unused but kept for handler signature compatibility
@@ -1252,7 +1253,19 @@ def cronjob(
             )
 
         if normalized == "list":
-            jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
+            # `home` scopes the read to another profile's cron store (e.g. a
+            # UI listing a bot whose profile runs its own gateway — #37). The
+            # store override is ContextVar-local and restored on exit, so this
+            # never leaks into the calling process's own store. Only `list` is
+            # scoped: mutating another profile's store through the same tool is
+            # deliberately unsupported (per-profile isolation, #4707).
+            if home is not None:
+                from cron.jobs import use_cron_store
+
+                with use_cron_store(home):
+                    jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
+            else:
+                jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
             return json.dumps({"success": True, "count": len(jobs), "jobs": jobs}, indent=2)
 
         if not job_id:

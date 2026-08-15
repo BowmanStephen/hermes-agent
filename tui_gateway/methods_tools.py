@@ -1683,14 +1683,21 @@ def _(rid, params: dict) -> dict:
         if action == "list":
             # Paused jobs are excluded by default, which reads as deletion in
             # any UI with an enable/disable toggle — forward the flag.
+            # `profile` scopes the read to another profile's cron store (its
+            # own HERMES_HOME) — the Routines pane lists a bot whose profile
+            # runs its own gateway (#37). The store override is context-local;
+            # mutation through this RPC stays deliberately unscoped.
+            kwargs: dict = {"action": "list", "include_disabled": is_truthy_value(params.get("include_disabled", False))}
+            profile_name = str(params.get("profile") or "").strip()
+            if profile_name:
+                from hermes_cli.profiles import profile_exists, resolve_profile_env
+
+                if not profile_exists(profile_name):
+                    return _err(rid, 4017, f"profile '{profile_name}' does not exist")
+                kwargs["home"] = resolve_profile_env(profile_name)
             return _ok(
                 rid,
-                json.loads(
-                    cronjob(
-                        action="list",
-                        include_disabled=is_truthy_value(params.get("include_disabled", False)),
-                    )
-                ),
+                json.loads(cronjob(**kwargs)),
             )
         if action == "add":
             return _ok(

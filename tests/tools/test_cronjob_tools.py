@@ -268,6 +268,43 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["prompt_preview"] == ""
         assert listing["jobs"][0]["schedule"] == "every 60m"
 
+    def test_list_scoped_to_another_profile_home(self, tmp_path, monkeypatch):
+        """`home` lists a different profile's cron store without touching the
+        caller's own store — the Routines pane path for separate-gateway bots
+        (#37). The store override must not leak past the call."""
+        # Foreign store: a profile whose HERMES_HOME lives elsewhere.
+        foreign = tmp_path / "foreign"
+        foreign_cron = foreign / "cron"
+        foreign_cron.mkdir(parents=True)
+        (foreign_cron / "jobs.json").write_text(json.dumps({"jobs": [{
+            "id": "foreignjob01",
+            "name": "[bot:foreign] Sweep",
+            "schedule_display": "0 10 * * 6",
+            "schedule": {"kind": "cron", "display": "0 10 * * 6"},
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+        }]}))
+
+        # Local store stays EMPTY (fixture default) — proves the read went
+        # to the foreign store, not the caller's.
+        listing = json.loads(cronjob(action="list", home=str(foreign)))
+        assert listing["success"] is True
+        assert listing["count"] == 1
+        assert listing["jobs"][0]["name"] == "[bot:foreign] Sweep"
+        assert listing["jobs"][0]["job_id"] == "foreignjob01"
+
+        # The caller's own store is untouched (isolation, #4707).
+        own = json.loads(cronjob(action="list"))
+        assert own["count"] == 0
+
+    def test_list_home_missing_store_returns_empty(self, tmp_path):
+        """A profile home with no cron store yet reads as zero jobs — never
+        an exception or a fallthrough to the caller's store."""
+        empty_home = tmp_path / "empty-profile"
+        listing = json.loads(cronjob(action="list", home=str(empty_home)))
+        assert listing["success"] is True
+        assert listing["count"] == 0
+
     def test_pause_and_resume(self):
         created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
         job_id = created["job_id"]

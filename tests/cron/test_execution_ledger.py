@@ -17,6 +17,36 @@ def _point_ledger(monkeypatch, tmp_path):
     return executions
 
 
+def test_execution_ledger_follows_active_profile_home(tmp_path):
+    """Multiplex-style home overrides must route attempts to that profile DB."""
+    repo = Path(__file__).resolve().parents[2]
+    root_home = tmp_path / "root"
+    profile_home = root_home / "profiles" / "bookie"
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(root_home)
+    env["PYTHONPATH"] = str(repo)
+    env["TEST_PROFILE_HOME"] = str(profile_home)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from hermes_constants import set_hermes_home_override, reset_hermes_home_override; "
+            "from cron.executions import create_execution; "
+            "import os; "
+            "token=set_hermes_home_override(os.environ['TEST_PROFILE_HOME']); "
+            "create_execution('profile-job', source='builtin'); "
+            "reset_hermes_home_override(token)",
+        ],
+        cwd=repo,
+        env=env,
+        check=True,
+    )
+
+    assert (profile_home / "cron" / "executions.db").is_file()
+    assert not (root_home / "cron" / "executions.db").exists()
+
+
 def test_execution_transitions_are_durable(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
 

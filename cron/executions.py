@@ -18,15 +18,30 @@ from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
 EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
+_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
 MAX_TERMINAL_EXECUTIONS = 1000
+
+
+def _current_executions_file():
+    """Return the ledger for the active profile without breaking overrides.
+
+    Multiplexed gateways switch the active home with a ContextVar while they
+    tick each profile. Resolve that home at call time so each profile gets its
+    own ledger. Preserve the historical ``EXECUTIONS_FILE`` monkeypatch/embedding
+    surface when a caller deliberately repoints the module constant.
+    """
+    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+        return EXECUTIONS_FILE
+    return get_hermes_home().resolve() / "cron" / "executions.db"
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
 
 def _connect() -> sqlite3.Connection:
-    EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
+    executions_file = _current_executions_file()
+    executions_file.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(executions_file, timeout=5)
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:

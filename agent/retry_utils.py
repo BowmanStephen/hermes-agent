@@ -18,7 +18,7 @@ from typing import Any, Optional
 _jitter_counter = 0
 _jitter_lock = threading.Lock()
 
-# Z.AI Coding Plan's GLM-5.2 endpoint often returns HTTP 429 code 1305
+# Z.AI Coding Plan's GLM-5.x endpoint often returns HTTP 429 code 1305
 # ("The service may be temporarily overloaded...") for otherwise valid
 # Hermes requests. Short retries tend to hammer the same overloaded window;
 # after a few normal retries, progressively widen the wait window. Keep the
@@ -154,7 +154,7 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
     return (
         status == 429
         and "api.z.ai/api/coding/paas/v4" in base
-        and "glm-5.2" in model_name
+        and ("glm-5.2" in model_name or "glm-5.3" in model_name)
         and ("1305" in text or "temporarily overloaded" in text)
     )
 
@@ -171,7 +171,7 @@ def adaptive_rate_limit_backoff(
     """Provider-aware rate-limit backoff.
 
     For most providers this returns ``default_wait`` unchanged. For Z.AI
-    Coding Plan GLM-5.2 overloads, keep the first ``short_attempts`` retries on
+    Coding Plan GLM-5.x overloads, keep the first ``short_attempts`` retries on
     the normal short exponential schedule, then switch to progressively longer
     waits (30s → 60s → 90s → 120s, capped) plus light jitter.
 

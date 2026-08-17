@@ -4936,7 +4936,7 @@ def run_conversation(
                     FailoverReason.timeout,
                     FailoverReason.overloaded,
                 }
-                # Z.AI Coding Plan GLM-5.2 overload 429s classify as
+                # Z.AI Coding Plan GLM-5.x overload 429s classify as
                 # `overloaded` (to spare the credential pool), but `overloaded`
                 # is excluded from `is_rate_limited` — the gate for the adaptive
                 # Z.AI backoff below. Detect the overload directly so its
@@ -4962,8 +4962,13 @@ def run_conversation(
                     # etc.) is throttling OpenRouter, so always fall back to a
                     # different model regardless of pool state.
                     _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
+                    # Z.AI Coding Plan overload is an upstream service
+                    # condition, not a bad credential. Never wait for a
+                    # multi-key pool to rotate through the same overloaded
+                    # endpoint; switch to the configured fallback chain after
+                    # the short retry window instead.
                     pool_may_recover = (
-                        False if _is_upstream
+                        False if (_is_upstream or _is_zai_coding_overload)
                         else _ra()._pool_may_recover_from_rate_limit(
                             agent._credential_pool,
                         )

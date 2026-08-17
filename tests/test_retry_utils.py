@@ -169,6 +169,15 @@ def test_zai_overload_ceiling_makes_long_tier_reachable(monkeypatch):
     assert long_waits == [30.0, 60.0, 90.0, 120.0]
 
 
+def test_zai_glm53_overload_uses_same_policy():
+    """The live VPS profile uses GLM-5.3; it must not bypass overload handling."""
+    assert is_zai_coding_overload_error(
+        base_url="https://api.z.ai/api/coding/paas/v4",
+        model="glm-5.3",
+        error=_zai_overload_error(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # parse_retry_after_seconds — shared Retry-After parser
 # ---------------------------------------------------------------------------

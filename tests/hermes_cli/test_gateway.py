@@ -1,10 +1,12 @@
 """Tests for hermes_cli.gateway."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import os
 import signal
 import subprocess
 import sys
+import threading
 import textwrap
 from types import ModuleType, SimpleNamespace
 
@@ -465,7 +467,9 @@ class TestReapUnsupervisedGatewayOrphansMacOS:
         monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
 
         # _get_service_pids returns the launchd-managed gateway PID.
-        monkeypatch.setattr(gateway, "_get_service_pids", lambda: {launchd_pid})
+        monkeypatch.setattr(
+            gateway, "_get_service_pids", lambda *, fail_closed=False: {launchd_pid}
+        )
 
         # find_gateway_pids returns the launchd PID plus a real orphan.
         # The reaper should only kill the orphan, not the launchd PID.
@@ -496,7 +500,9 @@ class TestReapUnsupervisedGatewayOrphansMacOS:
 
         monkeypatch.setattr(gateway, "is_macos", lambda: True)
         monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
-        monkeypatch.setattr(gateway, "_get_service_pids", lambda: {launchd_pid})
+        monkeypatch.setattr(
+            gateway, "_get_service_pids", lambda *, fail_closed=False: {launchd_pid}
+        )
 
         # find_gateway_pids would return the launchd PID, but it's excluded.
         monkeypatch.setattr(
@@ -512,6 +518,58 @@ class TestReapUnsupervisedGatewayOrphansMacOS:
 
         assert result is False  # no orphans reaped
         assert killed_pids == []  # nothing was killed
+
+    def test_concurrent_profile_reapers_fail_closed_when_root_lookup_times_out(
+        self, monkeypatch
+    ):
+        """A transient root launchd lookup failure must never expose its PID."""
+        root_pid = 52615
+        concurrent_lookups = 3
+        root_lookup_barrier = threading.Barrier(concurrent_lookups)
+
+        monkeypatch.setattr(gateway, "is_macos", lambda: True)
+        monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+        monkeypatch.setattr(
+            gateway, "get_launchd_label", lambda: "ai.hermes.gateway-analyst"
+        )
+
+        def fake_run(argv, **_kwargs):
+            label = argv[-1]
+            if label == "ai.hermes.gateway":
+                root_lookup_barrier.wait(timeout=5)
+                raise subprocess.TimeoutExpired(argv, 5)
+            return SimpleNamespace(returncode=1, stdout="")
+
+        monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            gateway,
+            "find_gateway_pids",
+            lambda exclude_pids=None: [
+                pid for pid in [root_pid] if pid not in (exclude_pids or set())
+            ],
+        )
+
+        killed_pids = []
+        killed_pids_lock = threading.Lock()
+
+        def record_kill(pid, _signal):
+            with killed_pids_lock:
+                killed_pids.append(pid)
+
+        monkeypatch.setattr(gateway.os, "kill", record_kill)
+        monkeypatch.setattr("gateway.status._pid_exists", lambda _pid: False)
+        monkeypatch.setattr("gateway.status.write_planned_stop_marker", lambda _pid: None)
+
+        with ThreadPoolExecutor(max_workers=concurrent_lookups) as executor:
+            results = list(
+                executor.map(
+                    lambda _index: gateway._reap_unsupervised_gateway_orphans(),
+                    range(concurrent_lookups),
+                )
+            )
+
+        assert results == [False] * concurrent_lookups
+        assert killed_pids == []
 
 
 def test_module_has_logger():

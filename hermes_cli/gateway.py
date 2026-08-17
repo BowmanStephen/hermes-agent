@@ -97,13 +97,17 @@ class ProfileGatewayProcess:
     pid: int
 
 
-def _get_service_pids() -> set:
+def _get_service_pids(*, fail_closed: bool = False) -> set:
     """Return PIDs currently managed by systemd or launchd gateway services.
 
     Used to avoid killing freshly-restarted service processes when sweeping
     for stale manual gateway processes after a service restart.  Relies on the
     service manager having committed the new PID before the restart command
     returns (true for both systemd and launchd in practice).
+
+    ``fail_closed`` is used only by destructive cleanup.  A transient launchd
+    lookup failure must abort that cleanup instead of turning a supervised PID
+    into an apparent orphan.
     """
     pids: set = set()
 
@@ -160,25 +164,44 @@ def _get_service_pids() -> set:
                     text=True, encoding='utf-8', errors='replace',
                     timeout=5,
                 )
-                if result.returncode == 0:
-                    # Try plist format first (macOS 26+): "PID" = <N>;
-                    pid = _parse_launchd_pid_from_list_output(result.stdout)
-                    if pid is not None and pid > 0:
-                        pids.add(pid)
-                    else:
-                        # Fall back to legacy tab-separated format:
-                        # "PID\tStatus\tLabel"
-                        for line in result.stdout.strip().splitlines():
-                            parts = line.split()
-                            if len(parts) >= 3 and parts[2] == label:
-                                try:
-                                    pid = int(parts[0])
-                                    if pid > 0:
-                                        pids.add(pid)
-                                except ValueError:
-                                    pass
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+                if result.returncode != 0:
+                    if (
+                        fail_closed
+                        and label == "ai.hermes.gateway"
+                        and result.returncode not in _LAUNCHD_JOB_UNLOADED_EXIT_CODES
+                    ):
+                        raise RuntimeError(
+                            "root launchd gateway PID lookup failed with "
+                            f"exit code {result.returncode}"
+                        )
+                    continue
+
+                # Try plist format first (macOS 26+): "PID" = <N>;
+                pid = _parse_launchd_pid_from_list_output(result.stdout)
+                if pid is not None and pid > 0:
+                    pids.add(pid)
+                    continue
+
+                # Fall back to legacy tab-separated format:
+                # "PID\tStatus\tLabel"
+                for line in result.stdout.strip().splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[2] == label:
+                        try:
+                            pid = int(parts[0])
+                            if pid > 0:
+                                pids.add(pid)
+                                break
+                        except ValueError:
+                            pass
+                else:
+                    if fail_closed and label == "ai.hermes.gateway":
+                        raise RuntimeError(
+                            "root launchd gateway is loaded without a positive PID"
+                        )
+        except (OSError, subprocess.TimeoutExpired):
+            if fail_closed:
+                raise
 
     return pids
 
@@ -1568,9 +1591,13 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
     # unsupervised orphan and gets SIGTERM'd, causing launchd to restart it.
     if is_macos():
         try:
-            own |= _get_service_pids()
+            own |= _get_service_pids(fail_closed=True)
         except Exception:
-            pass
+            logger.debug(
+                "Skipping macOS orphan reap because launchd PID discovery was incomplete",
+                exc_info=True,
+            )
+            return False
     try:
         # find_gateway_pids() includes no-supervisor `gateway restart` runtimes
         # for the current profile when no systemd supervisor is present.

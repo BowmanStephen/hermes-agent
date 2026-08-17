@@ -2070,18 +2070,71 @@ def _profile_arg(hermes_home: str | None = None, default_root: str | Path | None
     return f"--profile {name}" if name else ""
 
 
+def _systemd_unit_paths_for_service(service_name: str) -> tuple[Path, Path]:
+    """Return user- then system-scope paths for a specific systemd service."""
+    return (
+        Path.home() / ".config" / "systemd" / "user" / f"{service_name}.service",
+        Path("/etc/systemd/system") / f"{service_name}.service",
+    )
+
+
+def _pinned_hermes_home_from_systemd_unit(unit_path: Path) -> Path | None:
+    """Read a unit's HERMES_HOME without querying or exposing its full env."""
+    try:
+        text = unit_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("Environment="):
+            continue
+        try:
+            assignments = shlex.split(stripped[len("Environment=") :])
+        except ValueError:
+            continue
+        for assignment in assignments:
+            key, separator, value = assignment.partition("=")
+            if key != "HERMES_HOME" or not separator or not value:
+                continue
+            try:
+                return Path(value).resolve()
+            except OSError:
+                return None
+    return None
+
+
+def _legacy_base_system_unit_matches_current_home() -> bool:
+    """Return whether the unsuffixed system unit pins this active profile."""
+    try:
+        current_home = get_hermes_home().resolve()
+    except OSError:
+        return False
+    _, system_unit = _systemd_unit_paths_for_service(_SERVICE_BASE)
+    return _pinned_hermes_home_from_systemd_unit(system_unit) == current_home
+
+
 def get_service_name() -> str:
-    """Systemd service name: ``hermes-gateway`` for default HERMES_HOME, ``hermes-gateway-<profile>``
-    or ``-<hash>`` otherwise."""
+    """Return this profile's service name, with a safe legacy-system fallback.
+
+    Profile services are normally suffixed. A pre-profile system unit may
+    intentionally retain the unsuffixed name while pinning HERMES_HOME; reuse
+    it only when the unit names this exact active profile and no scoped unit
+    exists in either systemd scope.
+    """
     suffix = _profile_suffix()
-    return f"{_SERVICE_BASE}-{suffix}" if suffix else _SERVICE_BASE
+    if not suffix:
+        return _SERVICE_BASE
+    scoped_name = f"{_SERVICE_BASE}-{suffix}"
+    if any(path.exists() for path in _systemd_unit_paths_for_service(scoped_name)):
+        return scoped_name
+    if _legacy_base_system_unit_matches_current_home():
+        return _SERVICE_BASE
+    return scoped_name
 
 
 def get_systemd_unit_path(system: bool = False) -> Path:
-    name = get_service_name()
-    if system:
-        return Path("/etc/systemd/system") / f"{name}.service"
-    return Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
+    user_path, system_path = _systemd_unit_paths_for_service(get_service_name())
+    return system_path if system else user_path
 
 
 class UserSystemdUnavailableError(RuntimeError):

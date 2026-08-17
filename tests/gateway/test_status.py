@@ -250,6 +250,84 @@ class TestGatewayRuntimeStatus:
             ), cmdline
 
 
+    def test_runtime_status_running_pid_real_child_process(self, tmp_path):
+        """End-to-end regression: a real live child whose argv carries
+        ``hermes_cli.main gateway run -p scoreboard`` must be accepted for the
+        scoreboard profile home, rejected for any other profile, and rejected
+        when the recorded start_time is stale."""
+        import subprocess
+
+        scoreboard_home = tmp_path / "profiles" / "scoreboard"
+        scoreboard_home.mkdir(parents=True)
+        other_home = tmp_path / "profiles" / "other"
+        other_home.mkdir(parents=True)
+
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(20)",
+                "hermes_cli.main",
+                "gateway",
+                "run",
+                "-p",
+                "scoreboard",
+            ]
+        )
+        try:
+            start_time = status._get_process_start_time(child.pid)
+            if start_time is None:
+                pytest.skip("platform cannot fingerprint process start time")
+            if not status._read_process_cmdline(child.pid):
+                pytest.skip("platform cannot read live process command line")
+
+            payload = {
+                "pid": child.pid,
+                "gateway_state": "running",
+                "kind": "hermes-gateway",
+                "start_time": start_time,
+            }
+
+            # Matching profile: the live command line advertises -p scoreboard.
+            assert (
+                status.get_runtime_status_running_pid(
+                    payload, expected_home=scoreboard_home
+                )
+                == child.pid
+            )
+
+            # A different named profile is not served by this process.
+            assert (
+                status.get_runtime_status_running_pid(
+                    payload, expected_home=other_home
+                )
+                is None
+            )
+
+            # The root/default home is not served either (argv carries -p).
+            assert (
+                status.get_runtime_status_running_pid(
+                    payload, expected_home=tmp_path
+                )
+                is None
+            )
+
+            # A stale start_time means the PID was recycled: reject.
+            stale = dict(payload, start_time=start_time + 1)
+            assert (
+                status.get_runtime_status_running_pid(
+                    stale, expected_home=scoreboard_home
+                )
+                is None
+            )
+        finally:
+            child.terminate()
+            try:
+                child.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=20)
+
     def test_command_line_belongs_to_profile_normalizes_separators(self):
         """A Windows argv renders HERMES_HOME with backslashes while the
         profile's Path may carry forward slashes (and, on Windows, vice

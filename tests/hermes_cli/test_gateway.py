@@ -15,6 +15,39 @@ import pytest
 import hermes_cli.gateway as gateway
 
 
+def test_find_gateway_pids_sees_root_gateway_serving_active_profile(
+    monkeypatch, tmp_path
+):
+    """A named profile must see the root gateway when it multiplexes profiles."""
+    root = tmp_path / "hermes"
+    profile_home = root / "profiles" / "scoreboard"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda: [])
+    monkeypatch.setattr(gateway, "_scan_gateway_pids", lambda *args, **kwargs: [])
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: True)
+
+    def fake_get_running_pid(pid_path=None, **_kwargs):
+        return 4321 if pid_path == root / "gateway.pid" else None
+
+    monkeypatch.setattr("gateway.status.get_running_pid", fake_get_running_pid)
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda path=None: (
+            {
+                "gateway_state": "running",
+                "pid": 4321,
+                "served_profiles": ["default", "scoreboard"],
+            }
+            if path == root / "gateway_state.json"
+            else None
+        ),
+    )
+
+    assert gateway.find_gateway_pids() == [4321]
+
+
 def test_get_service_pids_includes_root_launchd_gateway_for_named_profile(monkeypatch):
     """A profile backend must not reap the root launchd-managed gateway."""
     monkeypatch.setattr(gateway, "is_macos", lambda: True)

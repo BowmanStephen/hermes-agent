@@ -183,7 +183,7 @@ def _get_service_pids(*, fail_closed: bool = False) -> set:
                     continue
 
                 # Fall back to legacy tab-separated format:
-                # "PID\tStatus\tLabel"
+                # "PID\\tStatus\\tLabel"
                 for line in result.stdout.strip().splitlines():
                     parts = line.split()
                     if len(parts) >= 3 and parts[2] == label:
@@ -381,6 +381,65 @@ def _append_unique_pid(
     if pid == os.getpid() or pid in exclude_pids or pid in pids:
         return
     pids.append(pid)
+
+
+def _find_multiplexed_profile_gateway_pid(exclude_pids: set[int]) -> int | None:
+    """Find the root gateway when it serves the active named profile.
+
+    A multiplexed gateway owns the root profile's PID/lock/state files even
+    while a CLI command runs with ``HERMES_HOME`` set to a named profile.  The
+    ordinary profile-scoped probe therefore misses the one process that is
+    actually ticking that profile.  Only trust the root gateway when its
+    runtime snapshot explicitly advertises the active profile in
+    ``served_profiles``; this keeps independent profile gateways isolated.
+    """
+    try:
+        from gateway.status import (
+            get_runtime_status_running_pid,
+            get_running_pid,
+            read_runtime_status,
+        )
+        from hermes_constants import get_default_hermes_root
+
+        current_home = Path(get_hermes_home()).resolve()
+        root_home = Path(get_default_hermes_root()).resolve()
+        if current_home == root_home:
+            return None
+
+        profile_arg = _profile_arg(str(current_home), default_root=root_home)
+        if not profile_arg.startswith("--profile "):
+            return None
+        profile_name = profile_arg.split(maxsplit=1)[1]
+
+        runtime_path = root_home / "gateway_state.json"
+        runtime = read_runtime_status(runtime_path)
+        if not isinstance(runtime, dict):
+            return None
+        served_profiles = runtime.get("served_profiles")
+        if not isinstance(served_profiles, list):
+            return None
+        if profile_name not in {str(name) for name in served_profiles}:
+            return None
+
+        pid = get_running_pid(
+            root_home / "gateway.pid",
+            cleanup_stale=False,
+        )
+        if pid is not None and pid not in exclude_pids:
+            return pid
+
+        # Launch-service-managed gateways may have a fresh runtime snapshot but
+        # no PID file.  Reuse the conservative runtime-status fallback used by
+        # the dashboard, scoped to the root home so a recycled PID from another
+        # profile cannot satisfy this probe.
+        pid = get_runtime_status_running_pid(runtime, expected_home=root_home)
+        if pid is not None and pid not in exclude_pids:
+            return pid
+    except Exception:
+        # Process discovery is best-effort; the existing scan remains the
+        # fallback when a runtime file is unreadable or a platform probe fails.
+        return None
+    return None
 
 
 def _scan_gateway_pids(
@@ -660,6 +719,12 @@ def find_gateway_pids(
             _append_unique_pid(pids, get_running_pid(), _exclude)
         except Exception:
             pass
+        if not pids:
+            _append_unique_pid(
+                pids,
+                _find_multiplexed_profile_gateway_pid(_exclude),
+                _exclude,
+            )
     for pid in _get_service_pids():
         _append_unique_pid(pids, pid, _exclude)
     try:

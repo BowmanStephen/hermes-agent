@@ -3287,7 +3287,10 @@ def _systemd_watchdog_service_fields(
 
 
 def _append_node_dir_for_service(
-    path_entries: list[str], hermes_root: Path | None = None
+    path_entries: list[str],
+    hermes_root: Path | None = None,
+    *,
+    node_search_paths: list[str] | None = None,
 ) -> None:
     """Add the Node directory a generated service unit should use to *path_entries*.
 
@@ -3306,7 +3309,9 @@ def _append_node_dir_for_service(
     candidate dir (hardened home) means "skip the rung", not "crash the
     generator".
 
-    PATH lookup remains the fallback rung for installs with no managed Node.
+    User units leave ``node_search_paths`` unset and preserve the calling
+    shell's fallback. System units search only the target user's known local
+    directories, so their persisted PATH is independent of the invoking shell.
     """
     from hermes_constants import (
         hermes_managed_node_tree_present,
@@ -3329,7 +3334,10 @@ def _append_node_dir_for_service(
     if managed_node_present:
         return
 
-    resolved_node = shutil.which("node")
+    if node_search_paths is None:
+        resolved_node = shutil.which("node")
+    else:
+        resolved_node = shutil.which("node", path=os.pathsep.join(node_search_paths))
     if not resolved_node:
         return
 
@@ -3397,7 +3405,9 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         # user-unit ordering where it's appended before PATH capture.
         _target_node_entries: list[str] = []
         _append_node_dir_for_service(
-            _target_node_entries, Path(hermes_home) if hermes_home else None
+            _target_node_entries,
+            Path(hermes_home) if hermes_home else None,
+            node_search_paths=_build_user_local_paths(Path(home_dir), []),
         )
         path_entries = [
             e for e in _target_node_entries if e not in path_entries

@@ -1242,7 +1242,11 @@ class A2AAdapter(BasePlatformAdapter):
         message_id = str(int(time.time() * 1000))
         if not (metadata or {}).get("notify"):
             logger.debug("A2A: ignoring non-final send for context %s", chat_id)
-            return SendResult(success=True, message_id=message_id)
+            # Nothing was delivered and therefore nothing can be edited.  A
+            # successful result makes GatewayStreamConsumer treat the ignored
+            # preview as real (even without a message id); its fallback then
+            # sends only the missing tail, truncating the A2A result.
+            return SendResult(success=False, error="A2A does not deliver streaming previews")
         if not self._resolve_oldest_for_context(chat_id, protocol.STATE_COMPLETED, content or ""):
             # No waiter (e.g. a late chunk or out-of-band send) — drop it.
             logger.debug("A2A: send() for context %s had no pending waiter", chat_id)

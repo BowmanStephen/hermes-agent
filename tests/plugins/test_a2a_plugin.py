@@ -606,6 +606,47 @@ def _bare_adapter():
 
 
 class TestReplyCapture:
+    def test_streamed_reply_preserves_text_before_uneditable_preview(self):
+        """A2A has no editable message, so its RPC result must contain the
+        complete streamed reply rather than only the fallback tail."""
+        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+        cases = [
+            ("EXACT_", "TOKEN", "EXACT_TOKEN"),
+            ("$ printf 'bounded-prefix\\n'", "\\nbounded-output", "$ printf 'bounded-prefix\\n'\\nbounded-output"),
+        ]
+
+        async def run_case(head, tail, expected):
+            adapter = _bare_adapter()
+            task_id = f"task-{len(expected)}"
+            context_id = f"ctx-{len(expected)}"
+            fut = adapter._add_pending(task_id, context_id)
+            consumer = GatewayStreamConsumer(
+                adapter,
+                context_id,
+                StreamConsumerConfig(
+                    edit_interval=0.01,
+                    buffer_threshold=1,
+                    cursor="",
+                ),
+            )
+            try:
+                consumer.on_delta(head)
+                stream_task = asyncio.create_task(consumer.run())
+                await asyncio.sleep(0.05)
+                consumer.on_delta(tail)
+                consumer.finish()
+                await stream_task
+                assert fut.result(timeout=0) == (protocol.STATE_COMPLETED, expected)
+            finally:
+                adapter._pop_pending(task_id)
+
+        async def run():
+            for case in cases:
+                await run_case(*case)
+
+        asyncio.run(run())
+
     def test_send_waits_for_notify_marked_final_reply(self):
         """Interim/editable sends must not satisfy the blocked A2A RPC future."""
         adapter = _bare_adapter()
@@ -617,7 +658,7 @@ class TestReplyCapture:
                 "⏩ Steered into current run (iteration 1/200).",
                 metadata={"expect_edits": True},
             )
-            assert interim.success is True
+            assert interim.success is False
             assert fut.done() is False
 
             final = await adapter.send(

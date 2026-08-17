@@ -512,6 +512,67 @@ class TestClientTools:
         # Outbound redaction applied before sending.
         assert "sk-abcdefghij" not in part["text"]
 
+    def test_call_expands_bearer_token_env_reference(self, monkeypatch):
+        monkeypatch.setenv("A2A_TEST_PEER_TOKEN", "resolved-test-token")
+        monkeypatch.setattr(
+            tools,
+            "_load_config",
+            lambda: {
+                "a2a_agents": {
+                    "r": {
+                        "url": "http://localhost:9999",
+                        "auth": {
+                            "type": "bearer",
+                            "token": "${A2A_TEST_PEER_TOKEN}",
+                        },
+                    }
+                }
+            },
+        )
+        monkeypatch.setattr(tools, "_http_get_json", lambda url, headers, timeout: None)
+        captured = {}
+
+        def fake_post(url, body, headers, timeout):
+            captured["authorization"] = headers.get("Authorization")
+            return protocol.jsonrpc_result(
+                body["id"],
+                protocol.build_task("t", "c1", protocol.STATE_COMPLETED, "PONG"),
+            )
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+
+        assert "PONG" in tools.a2a_call({"agent": "r", "message": "ping"})
+        assert captured["authorization"] == "Bearer resolved-test-token"
+
+    def test_call_with_missing_bearer_token_env_reference_fails_closed(self, monkeypatch):
+        monkeypatch.delenv("A2A_MISSING_PEER_TOKEN", raising=False)
+        monkeypatch.setattr(
+            tools,
+            "_load_config",
+            lambda: {
+                "a2a_agents": {
+                    "r": {
+                        "url": "http://localhost:9999",
+                        "auth": {
+                            "type": "bearer",
+                            "token": "${A2A_MISSING_PEER_TOKEN}",
+                        },
+                    }
+                }
+            },
+        )
+
+        def unexpected_network(*args, **kwargs):
+            pytest.fail("an unresolved bearer token must fail before network I/O")
+
+        monkeypatch.setattr(tools, "_http_get_json", unexpected_network)
+        monkeypatch.setattr(tools, "_http_post_json", unexpected_network)
+
+        out = tools.a2a_call({"agent": "r", "message": "ping"})
+
+        assert "bearer token" in out
+        assert "could not be resolved" in out
+
     def test_call_reports_input_required(self, monkeypatch):
         monkeypatch.setattr(tools, "_load_config",
                             lambda: {"a2a_agents": {"r": {"url": "http://localhost:9999"}}})

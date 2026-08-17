@@ -70,7 +70,14 @@ def _resolve_peer(agent: str) -> Optional[dict]:
 
 def _auth_header(auth: dict) -> dict:
     if auth and auth.get("type") == "bearer" and auth.get("token"):
-        return {"Authorization": f"Bearer {auth['token']}"}
+        from hermes_cli.config import _expand_env_vars
+
+        token = _expand_env_vars(str(auth["token"]))
+        if "${" in token:
+            raise ValueError(
+                "Error: configured bearer token could not be resolved from the environment."
+            )
+        return {"Authorization": f"Bearer {token}"}
     return {}
 
 

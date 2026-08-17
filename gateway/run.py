@@ -26631,6 +26631,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         if agent is None:
             return
+        # Memory providers are owned by this AIAgent, not by the task-scoped
+        # tool state that soft eviction deliberately preserves. Once the cache
+        # drops the agent there is no path that can reuse its MemoryManager;
+        # leaving it running strands provider-owned network clients (Hindsight
+        # owns an aiohttp ClientSession) until GC reports them as unclosed.
+        # Use shutdown_all() directly rather than shutdown_memory_provider():
+        # the latter also fires on_session_end, which would invent a session
+        # boundary for mode="none" sessions. The cap path commits finalizable
+        # sessions explicitly before it reaches this release method.
+        try:
+            memory_manager = getattr(agent, "_memory_manager", None)
+            if (
+                memory_manager is not None
+                and not getattr(memory_manager, "_shutting_down", False)
+            ):
+                memory_manager.shutdown_all()
+        except Exception:
+            pass
         try:
             if hasattr(agent, "release_clients"):
                 agent.release_clients()

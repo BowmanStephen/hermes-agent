@@ -475,6 +475,53 @@ class TestSalvageFollowups:
         assert agent._session_messages == []
         assert agent._db_flush_scan_prefix is None
 
+    def test_soft_release_closes_memory_provider_owned_aiohttp_session(self):
+        """Evicting an AIAgent must close resources owned by its memory manager.
+
+        Hindsight owns one aiohttp ClientSession per cached AIAgent. A soft
+        cache eviction permanently drops that agent, so preserving tool state
+        must not strand the manager's network session for garbage collection.
+        """
+        import aiohttp
+
+        from agent.memory_manager import MemoryManager
+        from gateway.run import GatewayRunner
+        from plugins.memory.hindsight import HindsightMemoryProvider
+
+        class AiohttpOwningClient:
+            session = None
+
+            async def open(self):
+                self.session = aiohttp.ClientSession()
+
+            async def aclose(self):
+                await self.session.close()
+
+        class Agent:
+            def __init__(self, memory_manager):
+                self._memory_manager = memory_manager
+                self._session_messages = []
+                self._db_flush_scan_prefix = None
+
+            def release_clients(self):
+                pass
+
+        provider = HindsightMemoryProvider()
+        provider._mode = "local_external"
+        client = AiohttpOwningClient()
+        provider._client = client
+        provider._run_sync(client.open())
+
+        manager = MemoryManager()
+        manager._providers = [provider]
+        runner = GatewayRunner.__new__(GatewayRunner)
+
+        try:
+            runner._release_evicted_agent_soft(Agent(manager))
+            assert client.session.closed
+        finally:
+            provider.shutdown()
+
     def test_no_evictable_warning_distinguishes_unflushed_persistence(self, monkeypatch, caplog):
         """When everything is blocked on un-flushed persistence (e.g. the
         session DB never initialized), the warning must say so instead of

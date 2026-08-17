@@ -457,6 +457,7 @@ def _(rid, params: dict) -> dict:
             from hermes_cli.tools_config import (
                 _get_effective_configurable_toolsets,
                 _get_platform_tools,
+                _parse_enabled_flag,
                 _toolset_allowed_for_platform,
             )
             from toolsets import resolve_toolset
@@ -532,10 +533,15 @@ def _(rid, params: dict) -> dict:
                         transport = "stdio"
                         if entry.get("url"):
                             transport = str(entry.get("transport") or "http")
+                        enabled = _parse_enabled_flag(
+                            entry.get("enabled", True), default=True
+                        ) and not _parse_enabled_flag(
+                            entry.get("disabled", False), default=False
+                        )
                         mcp_out.append(
                             {
                                 "name": str(srv_name),
-                                "enabled": not is_truthy_value(entry.get("disabled", False)),
+                                "enabled": enabled,
                                 "transport": transport,
                             }
                         )
@@ -583,7 +589,10 @@ def _(rid, params: dict) -> dict:
     ``model`` + ``provider`` (both required together),
     ``disabled_skills`` (list[str], replace semantics),
     ``enabled_toolsets`` (list[str], replace semantics; empty list clears
-    the pin so every toolset is enabled again).
+    the pin so every toolset is enabled again),
+    ``platform_toolsets`` (mapping of ``cli``/``discord`` to list[str],
+    replace semantics; empty lists explicitly disable all toolsets on that
+    surface).
 
     Each section is applied independently and best-effort; the result
     reports per-section success so a UI can surface partial failures.
@@ -682,6 +691,7 @@ def _(rid, params: dict) -> dict:
             isinstance(params.get("disabled_skills"), list)
             or isinstance(params.get("enabled_toolsets"), list)
             or isinstance(params.get("enabled_mcp_servers"), list)
+            or isinstance(params.get("platform_toolsets"), dict)
         )
         if needs_cfg:
             # Launch profile's MCP catalog, read BEFORE the home override
@@ -732,9 +742,35 @@ def _(rid, params: dict) -> dict:
                     except Exception:
                         applied["toolsets"] = False
 
+                if isinstance(params.get("platform_toolsets"), dict):
+                    try:
+                        requested = params["platform_toolsets"]
+                        allowed_platforms = {"cli", "discord"}
+                        if not set(requested).issubset(allowed_platforms):
+                            raise ValueError("platform_toolsets only supports cli and discord")
+
+                        platform_cfg = cfg.get("platform_toolsets")
+                        if not isinstance(platform_cfg, dict):
+                            platform_cfg = {}
+                        for platform, toolsets in requested.items():
+                            if not isinstance(toolsets, list):
+                                raise TypeError(f"platform_toolsets.{platform} must be a list")
+                            platform_cfg[platform] = list(
+                                dict.fromkeys(
+                                    str(toolset).strip()
+                                    for toolset in toolsets
+                                    if str(toolset).strip()
+                                )
+                            )
+                        cfg["platform_toolsets"] = platform_cfg
+                        save_config(cfg)
+                        applied["platform_toolsets"] = True
+                    except Exception:
+                        applied["platform_toolsets"] = False
+
                 # ``enabled_mcp_servers`` (list[str], replace semantics):
                 # toggle the profile's mcp_servers entries via the standard
-                # ``disabled`` flag. Enabling a server the profile doesn't
+                # ``enabled`` flag. Enabling a server the profile doesn't
                 # define copies its definition from the LAUNCH profile's
                 # config (capabilities UIs offer the main profile's catalog);
                 # unknown names are skipped, never invented. Server defs are
@@ -747,21 +783,22 @@ def _(rid, params: dict) -> dict:
                             if str(s).strip()
                         }
                         cfg = load_config() or {}
-                        mcp_cfg = (
-                            cfg.get("mcp_servers")
-                            if isinstance(cfg.get("mcp_servers"), dict)
-                            else {}
-                        )
+                        mcp_cfg_raw = cfg.get("mcp_servers")
+                        mcp_cfg = mcp_cfg_raw if isinstance(mcp_cfg_raw, dict) else {}
 
                         for srv in wanted:
-                            if srv in mcp_cfg and isinstance(mcp_cfg[srv], dict):
-                                mcp_cfg[srv].pop("disabled", None)
-                            elif srv in launch_mcp and isinstance(launch_mcp[srv], dict):
+                            if (
+                                srv not in mcp_cfg
+                                and srv in launch_mcp
+                                and isinstance(launch_mcp[srv], dict)
+                            ):
                                 mcp_cfg[srv] = dict(launch_mcp[srv])
-                                mcp_cfg[srv].pop("disabled", None)
                         for srv, entry in mcp_cfg.items():
-                            if srv not in wanted and isinstance(entry, dict):
-                                entry["disabled"] = True
+                            if isinstance(entry, dict):
+                                entry["enabled"] = srv in wanted
+                                # Normalize the legacy spelling so every reader
+                                # sees the same replace-semantics result.
+                                entry.pop("disabled", None)
 
                         if mcp_cfg:
                             cfg["mcp_servers"] = mcp_cfg

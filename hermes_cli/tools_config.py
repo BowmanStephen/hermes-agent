@@ -2313,6 +2313,14 @@ def _get_platform_tools(
     # Normalise to str so downstream sorted() never mixes types.
     toolset_names = [str(ts) for ts in toolset_names]
 
+    # An explicitly empty platform list is a deny-all selection. Return before
+    # composite recovery and default MCP injection: otherwise non-configurable
+    # toolsets such as kanban leak back onto surfaces the profile deliberately
+    # disabled. This is distinct from an omitted platform key, which falls back
+    # to that platform's normal composite.
+    if explicitly_configured and not toolset_names:
+        return set()
+
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     plugin_ts_keys = _get_plugin_toolset_keys()
     platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
@@ -2505,12 +2513,7 @@ def _get_platform_tools(
     if not isinstance(context_cfg, dict):
         context_cfg = {}
     context_engine_name = str(context_cfg.get("engine") or "compressor").strip().lower()
-    explicit_empty_selection = (
-        platform in platform_toolsets
-        and isinstance(platform_toolsets.get(platform), list)
-        and not toolset_names
-    )
-    if context_engine_name and context_engine_name != "compressor" and not explicit_empty_selection:
+    if context_engine_name and context_engine_name != "compressor":
         enabled_toolsets.add("context_engine")
 
     # Preserve any explicit non-configurable toolset entries (for example,

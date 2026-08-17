@@ -13,6 +13,25 @@ import pytest
 import hermes_cli.gateway as gateway
 
 
+def test_get_service_pids_includes_root_launchd_gateway_for_named_profile(monkeypatch):
+    """A profile backend must not reap the root launchd-managed gateway."""
+    monkeypatch.setattr(gateway, "is_macos", lambda: True)
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway, "get_launchd_label", lambda: "ai.hermes.gateway-analyst")
+
+    outputs = {
+        "ai.hermes.gateway-analyst": "",
+        "ai.hermes.gateway": '{\n\t\"PID\" = 52117;\n};\n',
+    }
+
+    def fake_run(argv, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=outputs[argv[-1]])
+
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    assert gateway._get_service_pids() == {52117}
+
+
 def _install_fake_gateway_run(monkeypatch, start_gateway):
     module = ModuleType("gateway.run")
     module.start_gateway = start_gateway

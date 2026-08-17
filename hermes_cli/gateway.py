@@ -147,30 +147,36 @@ def _get_service_pids() -> set:
     # --- launchd (macOS) ---
     if is_macos():
         try:
-            label = get_launchd_label()
-            result = subprocess.run(
-                ["launchctl", "list", label],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=5,
-            )
-            if result.returncode == 0:
-                # Try plist format first (macOS 26+): "PID" = <N>;
-                pid = _parse_launchd_pid_from_list_output(result.stdout)
-                if pid is not None and pid > 0:
-                    pids.add(pid)
-                else:
-                    # Fall back to legacy tab-separated format:
-                    # "PID\tStatus\tLabel"
-                    for line in result.stdout.strip().splitlines():
-                        parts = line.split()
-                        if len(parts) >= 3 and parts[2] == label:
-                            try:
-                                pid = int(parts[0])
-                                if pid > 0:
-                                    pids.add(pid)
-                            except ValueError:
-                                pass
+            # A named profile resolves its own service label (for example,
+            # ``ai.hermes.gateway-analyst``), but Desktop profile backends can
+            # still see the root launchd gateway ``ai.hermes.gateway``. Query
+            # both labels so the orphan sweep never mistakes that supervised
+            # root process for a manual orphan.
+            labels = {get_launchd_label(), "ai.hermes.gateway"}
+            for label in sorted(labels):
+                result = subprocess.run(
+                    ["launchctl", "list", label],
+                    capture_output=True,
+                    text=True, encoding='utf-8', errors='replace',
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    # Try plist format first (macOS 26+): "PID" = <N>;
+                    pid = _parse_launchd_pid_from_list_output(result.stdout)
+                    if pid is not None and pid > 0:
+                        pids.add(pid)
+                    else:
+                        # Fall back to legacy tab-separated format:
+                        # "PID\tStatus\tLabel"
+                        for line in result.stdout.strip().splitlines():
+                            parts = line.split()
+                            if len(parts) >= 3 and parts[2] == label:
+                                try:
+                                    pid = int(parts[0])
+                                    if pid > 0:
+                                        pids.add(pid)
+                                except ValueError:
+                                    pass
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 

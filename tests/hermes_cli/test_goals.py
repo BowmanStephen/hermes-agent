@@ -60,6 +60,31 @@ class TestParseJudgeResponse:
         assert wait == {"pid": 4242}
         assert reason == "CI running"
 
+    def test_blocked_verdict_is_distinct_from_done(self):
+        from hermes_cli.goals import _parse_judge_response
+
+        verdict, reason, parse_failed, wait = _parse_judge_response(
+            '{"verdict": "blocked", "reason": "needs user input"}'
+        )
+        assert verdict == "blocked"
+        assert reason == "needs user input"
+        assert parse_failed is False
+        assert wait is None
+
+    @pytest.mark.parametrize(
+        "alias",
+        ["stuck", "stalled", "unachievable", "needs_user_input", "requires_human"],
+    )
+    def test_blocked_aliases_normalize_to_blocked(self, alias):
+        from hermes_cli.goals import _parse_judge_response
+
+        verdict, _reason, parse_failed, wait = _parse_judge_response(
+            f'{{"verdict": "{alias}", "reason": "needs input"}}'
+        )
+        assert verdict == "blocked"
+        assert parse_failed is False
+        assert wait is None
+
 
 
 
@@ -136,6 +161,32 @@ class TestGoalManager:
         assert prompt is not None
         assert "port goal command to hermes" in prompt
         assert prompt.strip()  # non-empty
+
+    def test_blocked_verdict_stops_without_marking_goal_done(self, hermes_home):
+        """A goal that needs user input is blocked, not successfully complete."""
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="blocked-sid", default_max_turns=5)
+        mgr.set("make the change")
+
+        with patch.object(
+            goals,
+            "judge_goal",
+            return_value=("blocked", "needs user input", False, None, False),
+        ):
+            decision = mgr.evaluate_after_turn("I need user input before continuing")
+
+        assert decision["status"] == "blocked"
+        assert decision["verdict"] == "blocked"
+        assert decision["should_continue"] is False
+        assert decision["continuation_prompt"] is None
+        assert "blocked" in decision["message"].lower()
+        assert "needs user input" in decision["message"]
+        assert mgr.state is not None
+        assert mgr.state.status == "blocked"
+        assert mgr.state.last_verdict == "blocked"
+        assert mgr.next_continuation_prompt() is None
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -128,6 +128,28 @@ def test_loop_stops_when_worker_already_completed(monkeypatch):
     assert turns == []  # no extra turns
 
 
+def test_loop_blocks_when_judge_says_blocked(monkeypatch):
+    """A judge block must close the worker loop as blocked, not re-prompt it."""
+    _patch_judge(monkeypatch, ["blocked"])
+    turns = []
+    blocked_reasons = []
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t-blocked",
+        goal_text="do the thing",
+        run_turn=lambda p: turns.append(p) or "unexpected continuation",
+        task_status_fn=lambda: "running",
+        block_fn=blocked_reasons.append,
+        first_response="I need user input before I can continue.",
+    )
+
+    assert res["outcome"] == "blocked_by_judge"
+    assert "scripted:blocked" in res["reason"]
+    assert len(blocked_reasons) == 1
+    assert "scripted:blocked" in blocked_reasons[0]
+    assert turns == []
+
+
 
 
 

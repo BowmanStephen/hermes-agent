@@ -75,6 +75,23 @@ DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 3
 # run until the turn budget, wasting every turn on an unreachable judge.
 DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
 
+# Judge models sometimes use a natural-language equivalent instead of the
+# canonical ``blocked`` verdict. Normalize those aliases at the parser edge so
+# every consumer sees one stable state-machine value.
+_BLOCKED_VERDICT_ALIASES = frozenset(
+    {
+        "stuck",
+        "stalled",
+        "unachievable",
+        "impossible",
+        "needs_user",
+        "needs_user_input",
+        "needs_input",
+        "requires_user",
+        "requires_human",
+    }
+)
+
 # Quality gates: deterministic shell commands that must pass before the goal
 # judge may declare the goal done. Defaults mirror the bounded-autonomy
 # pattern (per-gate retry limit + timeout, bounded output fed back to the
@@ -151,12 +168,15 @@ JUDGE_SYSTEM_PROMPT = (
     "You are a strict judge evaluating whether an autonomous agent has "
     "achieved a user's stated goal. You receive the goal text, the agent's "
     "most recent response, and — when present — a list of background "
-    "processes the agent has running. Decide one of three verdicts.\n\n"
+    "processes the agent has running. Decide one of four verdicts.\n\n"
     "DONE — the goal is fully satisfied:\n"
     "- The response explicitly confirms the goal was completed, OR\n"
-    "- The response clearly shows the final deliverable was produced, OR\n"
-    "- The response explains the goal is unachievable / blocked / needs "
-    "user input (treat this as DONE with reason describing the block).\n\n"
+    "- The response clearly shows the final deliverable was produced.\n"
+    "\n"
+    "BLOCKED — the goal cannot proceed without user input or a change in "
+    "conditions:\n"
+    "- The response explains the goal is unachievable, blocked, or needs "
+    "user input. Do NOT label this DONE.\n\n"
     "WAIT — the goal is NOT done, but the next step is to wait for async "
     "work to finish rather than act again. Choose this ONLY when the agent's "
     "progress is genuinely gated on something running on its own:\n"
@@ -178,12 +198,14 @@ JUDGE_SYSTEM_PROMPT = (
     "take right now. This is the default when in doubt.\n\n"
     "Reply ONLY with a single JSON object on one line. Shapes:\n"
     '{"verdict": "done", "reason": "<one sentence>"}\n'
+    '{"verdict": "blocked", "reason": "<one sentence>"}\n'
     '{"verdict": "continue", "reason": "<one sentence>"}\n'
     '{"verdict": "wait", "wait_on_session": "<id>", "reason": "<one sentence>"}\n'
     '{"verdict": "wait", "wait_on_pid": <int>, "reason": "<one sentence>"}\n'
     '{"verdict": "wait", "wait_for_seconds": <int>, "reason": "<one sentence>"}\n'
     "The legacy shape {\"done\": <true|false>, \"reason\": \"...\"} is still "
-    "accepted (true=done, false=continue)."
+    "accepted (true=done, false=continue); use the explicit blocked verdict "
+    "when the goal cannot proceed."
 )
 
 
@@ -201,7 +223,7 @@ JUDGE_USER_PROMPT_TEMPLATE = (
     "Agent's most recent response:\n{response}\n\n"
     "{background_block}"
     "Current time: {current_time}\n\n"
-    "Is the goal satisfied — done, continue, or wait?"
+    "Is the goal satisfied — done, blocked, continue, or wait?"
 )
 
 # Used when the user has added /subgoal criteria. The judge must
@@ -219,8 +241,8 @@ JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "met' or 'implying it was done' — require specific evidence (a "
     "file contents excerpt, an output line, a command result). If "
     "ANY criterion lacks specific evidence in the response, the goal "
-    "is NOT done — return CONTINUE (or WAIT if blocked on a listed "
-    "background process).\n\n"
+    "is NOT done — return CONTINUE (or BLOCKED if user input is required, "
+    "or WAIT if blocked on a listed background process).\n\n"
     "Is the goal AND every additional criterion satisfied?"
 )
 
@@ -246,10 +268,10 @@ JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "verification and it's still running), return WAIT on that process "
     "instead of re-poking — re-poking now would be pure busy-work.\n"
     "- If the response explains the work is blocked / unachievable / needs "
-    "user input (e.g. the stated Stop condition was hit), treat it as DONE "
-    "with the reason describing the block.\n"
+    "user input (e.g. the stated Stop condition was hit), return BLOCKED "
+    "with the reason describing the block — never DONE.\n"
     "- Otherwise the goal is NOT done — CONTINUE.\n\n"
-    "Is the goal satisfied per its completion contract — done, continue, or wait?"
+    "Is the goal satisfied per its completion contract — done, blocked, continue, or wait?"
 )
 
 
@@ -546,12 +568,12 @@ class GoalState:
     """Serializable goal state stored per session."""
 
     goal: str
-    status: str = "active"          # active | paused | done | cleared
+    status: str = "active"          # active | paused | blocked | done | cleared
     turns_used: int = 0
     max_turns: int = DEFAULT_MAX_TURNS
     created_at: float = 0.0
     last_turn_at: float = 0.0
-    last_verdict: Optional[str] = None        # "done" | "continue" | "skipped"
+    last_verdict: Optional[str] = None        # "done" | "blocked" | "continue" | "skipped"
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
@@ -864,7 +886,7 @@ def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, 
     """Parse the judge's reply. Fail-open on unusable output.
 
     Returns ``(verdict, reason, parse_failed, wait_directive)`` where:
-      - ``verdict`` is ``"done"``, ``"continue"``, or ``"wait"``.
+      - ``verdict`` is ``"done"``, ``"blocked"``, ``"continue"``, or ``"wait"``.
       - ``parse_failed`` is True when the judge returned output that couldn't
         be interpreted as the expected JSON verdict (empty body, prose,
         malformed JSON). Callers use it to auto-pause after N consecutive
@@ -921,7 +943,9 @@ def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, 
             done = bool(done_val)
         verdict = "done" if done else "continue"
 
-    if verdict not in {"done", "continue", "wait"}:
+    if verdict in _BLOCKED_VERDICT_ALIASES:
+        verdict = "blocked"
+    elif verdict not in {"done", "blocked", "continue", "wait"}:
         verdict = "continue"
 
     if verdict != "wait":
@@ -1015,7 +1039,7 @@ def judge_goal(
     """Ask the auxiliary model whether the goal is satisfied.
 
     Returns ``(verdict, reason, parse_failed, wait_directive, transport_failed)`` where verdict
-    is ``"done"``, ``"continue"``, ``"wait"``, or ``"skipped"`` (when the
+    is ``"done"``, ``"blocked"``, ``"continue"``, ``"wait"``, or ``"skipped"`` (when the
     judge couldn't be reached). ``wait_directive`` is set only for ``"wait"``
     (``{"pid": int}`` or ``{"seconds": int}``); ``None`` otherwise.
 
@@ -1268,7 +1292,10 @@ class GoalManager:
         return self._state is not None and self._state.status == "active"
 
     def has_goal(self) -> bool:
-        return self._state is not None and self._state.status in {"active", "paused"}
+        # A blocked goal remains recoverable: the user can provide input with
+        # /goal resume or replace/clear it. Do not make it disappear from the
+        # goal controls merely because the autonomous loop stopped.
+        return self._state is not None and self._state.status in {"active", "paused", "blocked"}
 
     def has_contract(self) -> bool:
         return self._state is not None and self._state.has_contract()
@@ -1297,6 +1324,9 @@ class GoalManager:
         if s.status == "paused":
             extra = f" — {s.paused_reason}" if s.paused_reason else ""
             return f"⏸ Goal (paused, {meta}{extra}): {s.goal}"
+        if s.status == "blocked":
+            extra = f" — {s.last_reason}" if s.last_reason else ""
+            return f"⛔ Goal (blocked, {meta}{extra}): {s.goal}"
         if s.status == "done":
             return f"✓ Goal done ({meta}): {s.goal}"
         return f"Goal ({s.status}, {meta}): {s.goal}"
@@ -1712,7 +1742,7 @@ class GoalManager:
           - ``status``: current goal status after update
           - ``should_continue``: bool — caller should fire another turn
           - ``continuation_prompt``: str or None
-          - ``verdict``: "done" | "continue" | "wait" | "skipped" | "inactive"
+          - ``verdict``: "done" | "blocked" | "continue" | "wait" | "skipped" | "inactive"
           - ``reason``: str
           - ``message``: user-visible one-liner to print/send
         """
@@ -1839,6 +1869,22 @@ class GoalManager:
                 "verdict": "done",
                 "reason": reason,
                 "message": f"✓ Goal achieved: {reason}",
+            }
+
+        if verdict == "blocked":
+            # A blocked goal is terminal for the autonomous loop, but it is
+            # not successful completion. Keep the state and reason so the
+            # user can see what input/condition is missing, then recover via
+            # /goal resume after resolving the block.
+            state.status = "blocked"
+            save_goal(self.session_id, state)
+            return {
+                "status": "blocked",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "blocked",
+                "reason": reason,
+                "message": f"⛔ Goal blocked: {reason}",
             }
 
         # Auto-pause when the judge cannot reach the API at all N turns in a
@@ -2031,8 +2077,8 @@ def run_kanban_goal_loop(
 
     Returns a decision dict: ``{"outcome", "turns_used", "reason"}`` where
     outcome is one of ``"completed_by_worker"``, ``"review_requested_by_worker"``,
-    ``"changes_requested_by_reviewer"``, ``"blocked_budget"``,
-    ``"blocked_by_worker"``, or ``"stopped"``.
+    ``"changes_requested_by_reviewer"``, ``"blocked_by_judge"``,
+    ``"blocked_budget"``, ``"blocked_by_worker"``, or ``"stopped"``.
     """
 
     def _log(msg: str) -> None:
@@ -2087,6 +2133,22 @@ def run_kanban_goal_loop(
         if verdict == "wait":
             verdict = "continue"
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
+
+        if verdict == "blocked":
+            # The judge has determined that autonomous progress cannot continue
+            # without user input or a changed condition. Do not feed the worker
+            # another continuation prompt; make the card's blocked state carry
+            # the concrete reason for the operator.
+            block_reason = f"Goal-mode worker blocked by judge: {reason}"
+            try:
+                block_fn(block_reason)
+            except Exception as exc:
+                _log(f"kanban goal loop: block_fn failed ({exc})")
+            return {
+                "outcome": "blocked_by_judge",
+                "turns_used": turns_used,
+                "reason": reason,
+            }
 
         if verdict == "done":
             if nudged_to_finalize:

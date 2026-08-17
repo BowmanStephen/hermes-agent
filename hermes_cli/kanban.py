@@ -414,7 +414,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         metavar="PROFILE:TITLE[:SKILL,SKILL]",
         help="Parallel worker card (repeatable)",
     )
-    p_swarm.add_argument("--verifier", required=True, help="Verifier profile")
+    p_swarm.add_argument(
+        "--verifier",
+        default=None,
+        help=(
+            "Verifier profile (defaults to reviewer when that profile is installed)"
+        ),
+    )
     p_swarm.add_argument("--synthesizer", required=True, help="Synthesizer/writer profile")
     p_swarm.add_argument("--tenant", default=None, help="Tenant namespace")
     p_swarm.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")

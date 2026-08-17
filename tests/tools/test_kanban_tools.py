@@ -124,6 +124,8 @@ def test_complete_happy_path(worker_env):
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
+        task = kb.get_task(conn, worker_env)
+        assert task.result == "got the thing done"
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
         assert run.summary == "got the thing done"

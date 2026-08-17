@@ -24,6 +24,8 @@ from typing import Any, Iterable, Optional
 from hermes_cli import kanban_db as kb
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
+DEFAULT_VERIFIER_ASSIGNEE = "reviewer"
+VERIFIER_SKILL = "code-review"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,17 @@ def _require_text(value: str, field_name: str) -> str:
     if not text:
         raise ValueError(f"{field_name} is required")
     return text
+
+
+def _resolve_verifier_assignee(value: Optional[str]) -> str:
+    """Use the dedicated reviewer when available; otherwise fail closed."""
+    if value and value.strip():
+        return value.strip()
+    if DEFAULT_VERIFIER_ASSIGNEE in kb.list_profiles_on_disk():
+        return DEFAULT_VERIFIER_ASSIGNEE
+    raise ValueError(
+        "verifier_assignee is required because the reviewer profile is not installed"
+    )
 
 
 def _swarm_context(root_id: str, goal: str) -> str:
@@ -130,8 +143,8 @@ def create_swarm(
     *,
     goal: str,
     workers: Iterable[SwarmWorkerSpec],
-    verifier_assignee: str,
     synthesizer_assignee: str,
+    verifier_assignee: Optional[str] = None,
     root_title: Optional[str] = None,
     verifier_title: str = "Verify swarm outputs",
     synthesizer_title: str = "Synthesize swarm outputs",
@@ -201,8 +214,8 @@ def _create_swarm_uncommitted(
     *,
     goal: str,
     workers: Iterable[SwarmWorkerSpec],
-    verifier_assignee: str,
     synthesizer_assignee: str,
+    verifier_assignee: Optional[str] = None,
     root_title: Optional[str] = None,
     verifier_title: str = "Verify swarm outputs",
     synthesizer_title: str = "Synthesize swarm outputs",
@@ -221,7 +234,7 @@ def _create_swarm_uncommitted(
     """
 
     goal = _require_text(goal, "goal")
-    verifier_assignee = _require_text(verifier_assignee, "verifier_assignee")
+    verifier_assignee = _resolve_verifier_assignee(verifier_assignee)
     synthesizer_assignee = _require_text(synthesizer_assignee, "synthesizer_assignee")
     worker_specs = list(workers)
     if not worker_specs:
@@ -301,7 +314,7 @@ def _create_swarm_uncommitted(
         priority=priority,
         workspace_kind=workspace_kind,
         workspace_path=workspace_path,
-        skills=["requesting-code-review"],
+        skills=[VERIFIER_SKILL],
     )
 
     synthesizer_body = (

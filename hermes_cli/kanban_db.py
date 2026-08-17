@@ -5335,8 +5335,9 @@ def complete_task(
 
     ``summary`` and ``metadata`` are stored on the closing run (if any)
     and surfaced to downstream children via :func:`build_worker_context`.
-    When ``summary`` is omitted we fall back to ``result`` so single-run
-    callers do not have to pass both. ``metadata`` is a free-form dict
+    ``summary`` also populates the task-level ``result`` when callers do
+    not provide an explicit ``result``, so board task JSON retains the
+    authoritative worker handoff. ``metadata`` is a free-form dict
     (e.g. ``{"changed_files": [...], "tests_run": [...]}``) — workers
     are encouraged to use it for structured handoff facts.
 
@@ -5391,6 +5392,7 @@ def complete_task(
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
+    task_result = result if result is not None else summary
     with write_txn(conn):
         # Parent completion is a hard invariant even for direct human review
         # approval. A parent may have been reopened after this task entered
@@ -5417,7 +5419,7 @@ def complete_task(
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked', 'review')
                 """,
-                (result, now, task_id),
+                (task_result, now, task_id),
             )
         else:
             cur = conn.execute(
@@ -5435,7 +5437,7 @@ def complete_task(
                    AND status IN ('running', 'ready', 'blocked', 'review')
                    AND current_run_id = ?
                 """,
-                (result, now, task_id, int(expected_run_id)),
+                (task_result, now, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False

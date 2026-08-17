@@ -1,6 +1,9 @@
+import argparse
+
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban as kanban_cli
 from hermes_cli.kanban_swarm import (
     SwarmWorkerSpec,
     create_swarm,
@@ -40,12 +43,88 @@ def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path)
         assert [task.status for task in workers] == ["ready", "ready"]
         assert [task.assignee for task in workers] == ["researcher-a", "researcher-b"]
         assert verifier.status == "todo"
+        assert verifier.assignee == "reviewer"
+        assert verifier.skills == ["code-review"]
         assert synthesizer.status == "todo"
+        assert synthesizer.assignee == "writer"
         assert set(kb.parent_ids(conn, created.verifier_id)) == set(created.worker_ids)
         assert kb.parent_ids(conn, created.synthesizer_id) == [created.verifier_id]
         assert all(created.root_id in (task.body or "") for task in workers)
     finally:
         conn.close()
+
+
+def test_create_swarm_defaults_to_independent_reviewer_profile(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(kb, "list_profiles_on_disk", lambda: ["reviewer", "writer"])
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Build, independently verify, then publish.",
+            workers=[
+                SwarmWorkerSpec(profile="builder", title="Build", body="Implement"),
+            ],
+            synthesizer_assignee="writer",
+        )
+
+        verifier = kb.get_task(conn, created.verifier_id)
+        synthesizer = kb.get_task(conn, created.synthesizer_id)
+        assert verifier is not None
+        assert synthesizer is not None
+        assert verifier.assignee == "reviewer"
+        assert verifier.assignee != synthesizer.assignee
+        assert verifier.skills == ["code-review"]
+    finally:
+        conn.close()
+
+
+def test_create_swarm_without_reviewer_profile_fails_closed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(kb, "list_profiles_on_disk", lambda: ["default", "writer"])
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        with pytest.raises(
+            ValueError,
+            match="reviewer profile is not installed",
+        ):
+            create_swarm(
+                conn,
+                goal="Do not silently self-review.",
+                workers=[
+                    SwarmWorkerSpec(
+                        profile="default",
+                        title="Build",
+                        body="Implement",
+                    ),
+                ],
+                synthesizer_assignee="writer",
+            )
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_swarm_cli_defers_verifier_default_to_profile_aware_factory():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    kanban_cli.build_parser(subparsers)
+
+    args = parser.parse_args(
+        [
+            "kanban",
+            "swarm",
+            "Build and verify",
+            "--worker",
+            "builder:Build",
+            "--synthesizer",
+            "writer",
+        ]
+    )
+
+    assert args.verifier is None
 
 
 def test_create_swarm_graph_is_atomic_and_rolls_back_partial_build(

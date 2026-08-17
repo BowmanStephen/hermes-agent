@@ -1073,7 +1073,7 @@ class TestSystemUnitRefreshSyncsHermesHome:
         monkeypatch.setattr(
             gateway_cli, "_build_user_local_paths", lambda home, existing: []
         )
-        monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: None)
+        monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd, path=None: None)
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "_run_systemctl", lambda *a, **k: None)
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)

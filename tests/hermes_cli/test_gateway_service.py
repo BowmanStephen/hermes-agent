@@ -20,6 +20,68 @@ from gateway.restart import (
 )
 
 
+class TestSystemdServiceIdentity:
+    def test_profile_reuses_matching_unsuffixed_system_unit(self, tmp_path, monkeypatch):
+        """A legacy base unit remains the active service for its pinned profile."""
+        hermes_root = tmp_path / ".hermes"
+        profile_home = hermes_root / "profiles" / "research-dick"
+        profile_home.mkdir(parents=True)
+        system_units = tmp_path / "systemd"
+        system_units.mkdir()
+        (system_units / "hermes-gateway.service").write_text(
+            '[Service]\nEnvironment="HERMES_HOME=' + str(profile_home) + '"\n',
+            encoding="utf-8",
+        )
+
+        real_path = gateway_cli.Path
+
+        def fake_path(value):
+            if value == "/etc/systemd/system":
+                return system_units
+            return real_path(value)
+        fake_path.home = real_path.home
+
+        monkeypatch.setattr(gateway_cli, "Path", fake_path)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_home)
+        monkeypatch.setattr(
+            "hermes_constants.get_default_hermes_root", lambda: hermes_root
+        )
+
+        assert gateway_cli.get_service_name() == "hermes-gateway"
+
+    def test_profile_ignores_unsuffixed_system_unit_for_other_home(
+        self, tmp_path, monkeypatch
+    ):
+        """Compatibility discovery must not claim another profile's gateway."""
+        hermes_root = tmp_path / ".hermes"
+        profile_home = hermes_root / "profiles" / "research-dick"
+        other_profile = hermes_root / "profiles" / "other"
+        profile_home.mkdir(parents=True)
+        other_profile.mkdir()
+        system_units = tmp_path / "systemd"
+        system_units.mkdir()
+        (system_units / "hermes-gateway.service").write_text(
+            '[Service]\nEnvironment="HERMES_HOME=' + str(other_profile) + '"\n',
+            encoding="utf-8",
+        )
+
+        real_path = gateway_cli.Path
+
+        def fake_path(value):
+            if value == "/etc/systemd/system":
+                return system_units
+            return real_path(value)
+        fake_path.home = real_path.home
+
+        monkeypatch.setattr(gateway_cli, "Path", fake_path)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_home)
+        monkeypatch.setattr(
+            "hermes_constants.get_default_hermes_root", lambda: hermes_root
+        )
+
+        assert gateway_cli.get_service_name() == "hermes-gateway-research-dick"
+
+
 class TestUserSystemdPrivateSocketPreflight:
     def test_preflight_accepts_private_socket_without_dbus_bus(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "_ensure_user_systemd_env", lambda: None)

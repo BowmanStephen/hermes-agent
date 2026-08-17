@@ -798,3 +798,132 @@ class TestContractAndBackgroundCompose:
         assert verdict == "wait"
         assert wait_directive and wait_directive.get("pid") == 4242
 
+
+# ──────────────────────────────────────────────────────────────────────
+# BLOCKED verdict — distinguish "we hit a wall" from "we finished"
+# ──────────────────────────────────────────────────────────────────────
+class TestBlockedVerdict:
+    """Regression: the judge used to treat 'blocked / unachievable /
+    needs user input' as DONE. That falsely reported success and made it
+    impossible to audit goals that actually stalled. The judge now has a
+    dedicated BLOCKED verdict that maps to a distinct state.
+    """
+
+    # ── Parser acceptance ──────────────────────────────────────────
+    def test_parse_judge_response_accepts_blocked(self):
+        from hermes_cli.goals import _parse_judge_response
+
+        verdict, reason, pf, wait = _parse_judge_response(
+            '{"verdict": "blocked", "reason": "missing API key for provider X"}'
+        )
+        assert verdict == "blocked"
+        assert reason == "missing API key for provider X"
+        assert pf is False
+        assert wait is None
+
+    def test_parse_judge_response_normalizes_blocked_aliases(self):
+        """Judge models that emit 'unachievable' / 'needs_user_input' etc.
+        instead of 'blocked' must land on the canonical verdict."""
+        from hermes_cli.goals import _parse_judge_response
+
+        for alias in ("blocked", "stuck", "stalled", "unachievable",
+                      "impossible", "needs_user", "needs_user_input",
+                      "needs_input", "requires_user", "needs_human"):
+            verdict, _, pf, _ = _parse_judge_response(
+                f'{{"verdict": "{alias}", "reason": "r"}}'
+            )
+            assert verdict == "blocked", f"alias {alias!r} should map to blocked"
+            assert pf is False
+
+    def test_parse_judge_response_unknown_verdict_falls_through_to_continue(self):
+        """Fail-open contract: anything unrecognized still maps to continue,
+        NOT to the new blocked state."""
+        from hermes_cli.goals import _parse_judge_response
+
+        verdict, _, _, _ = _parse_judge_response(
+            '{"verdict": "garbage", "reason": "nonsense"}'
+        )
+        assert verdict == "continue"
+
+    # ── Manager transition ─────────────────────────────────────────
+    def test_evaluate_after_turn_marks_blocked(self, hermes_home):
+        """verdict=blocked → state.status='blocked', loop stops, distinct
+        user message; no parse-failure counter bumps."""
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="blocked-sid-1", default_max_turns=10)
+        mgr.set("impossible task")
+
+        with patch.object(
+            goals, "judge_goal",
+            return_value=("blocked", "creds missing", False, None, False),
+        ):
+            decision = mgr.evaluate_after_turn("I can't proceed — creds missing")
+
+        assert decision["verdict"] == "blocked"
+        assert decision["status"] == "blocked"
+        assert decision["should_continue"] is False
+        assert decision["continuation_prompt"] is None
+        assert "Goal blocked" in decision["message"]
+        # Parse-failure counters untouched — blocked is a real verdict, not
+        # a parse error.
+        assert mgr.state.consecutive_parse_failures == 0
+        assert mgr.state.consecutive_transport_failures == 0
+        # Status persisted.
+        from hermes_cli.goals import load_goal
+        stored = load_goal("blocked-sid-1")
+        assert stored is not None and stored.status == "blocked"
+
+    def test_evaluate_after_turn_blocked_resumable(self, hermes_home):
+        """User can /goal resume a blocked goal after fixing the blocker."""
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="blocked-sid-2", default_max_turns=10)
+        mgr.set("blocked then resumed")
+        with patch.object(
+            goals, "judge_goal",
+            return_value=("blocked", "needs API key", False, None, False),
+        ):
+            mgr.evaluate_after_turn("blocked")
+        assert mgr.state.status == "blocked"
+
+        resumed = mgr.resume()
+        assert resumed is not None
+        assert mgr.state.status == "active"
+        # Resume clears stale blocked marker via last_verdict update on next
+        # turn; last_reason stays as an audit trail only.
+
+    def test_status_line_shows_blocked(self, hermes_home):
+        """Status line must distinguish blocked from done with the reason."""
+        from hermes_cli.goals import GoalManager, save_goal
+
+        mgr = GoalManager(session_id="blocked-sid-3")
+        mgr.set("blocked goal")
+        mgr.state.status = "blocked"
+        mgr.state.last_reason = "waiting on user approval"
+        save_goal(mgr.session_id, mgr.state)
+
+        line = mgr.status_line()
+        assert "blocked" in line.lower()
+        assert "✗" in line
+        assert "waiting on user approval" in line
+
+    # ── Regression guard: existing verdicts unchanged ──────────────
+    def test_done_verdict_unchanged(self, hermes_home):
+        """Sanity: adding blocked must not break the existing done path."""
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="done-sid-sanity", default_max_turns=5)
+        mgr.set("simple task")
+        with patch.object(
+            goals, "judge_goal",
+            return_value=("done", "all done", False, None, False),
+        ):
+            decision = mgr.evaluate_after_turn("finished the thing")
+        assert decision["status"] == "done"
+        assert decision["verdict"] == "done"
+        assert mgr.state.status == "done"
+

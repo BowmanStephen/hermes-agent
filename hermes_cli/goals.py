@@ -151,12 +151,14 @@ JUDGE_SYSTEM_PROMPT = (
     "You are a strict judge evaluating whether an autonomous agent has "
     "achieved a user's stated goal. You receive the goal text, the agent's "
     "most recent response, and — when present — a list of background "
-    "processes the agent has running. Decide one of three verdicts.\n\n"
+    "processes the agent has running. Decide one of four verdicts.\n\n"
     "DONE — the goal is fully satisfied:\n"
     "- The response explicitly confirms the goal was completed, OR\n"
-    "- The response clearly shows the final deliverable was produced, OR\n"
-    "- The response explains the goal is unachievable / blocked / needs "
-    "user input (treat this as DONE with reason describing the block).\n\n"
+    "- The response clearly shows the final deliverable was produced.\n\n"
+    "BLOCKED — the response explains the goal is unachievable, blocked by "
+    "an external dependency, missing a decision/permission, or needs user "
+    "input. The agent cannot make progress on its own; use this (not DONE) "
+    "so the loop stops as blocked rather than falsely reporting success.\n\n"
     "WAIT — the goal is NOT done, but the next step is to wait for async "
     "work to finish rather than act again. Choose this ONLY when the agent's "
     "progress is genuinely gated on something running on its own:\n"
@@ -178,6 +180,7 @@ JUDGE_SYSTEM_PROMPT = (
     "take right now. This is the default when in doubt.\n\n"
     "Reply ONLY with a single JSON object on one line. Shapes:\n"
     '{"verdict": "done", "reason": "<one sentence>"}\n'
+    '{"verdict": "blocked", "reason": "<one sentence>"}\n'
     '{"verdict": "continue", "reason": "<one sentence>"}\n'
     '{"verdict": "wait", "wait_on_session": "<id>", "reason": "<one sentence>"}\n'
     '{"verdict": "wait", "wait_on_pid": <int>, "reason": "<one sentence>"}\n'
@@ -246,10 +249,11 @@ JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "verification and it's still running), return WAIT on that process "
     "instead of re-poking — re-poking now would be pure busy-work.\n"
     "- If the response explains the work is blocked / unachievable / needs "
-    "user input (e.g. the stated Stop condition was hit), treat it as DONE "
-    "with the reason describing the block.\n"
+    "user input (e.g. the stated Stop condition was hit), return BLOCKED "
+    "with the reason describing the block — do NOT return DONE.\n"
     "- Otherwise the goal is NOT done — CONTINUE.\n\n"
-    "Is the goal satisfied per its completion contract — done, continue, or wait?"
+    "Is the goal satisfied per its completion contract — done, blocked, "
+    "continue, or wait?"
 )
 
 
@@ -546,12 +550,12 @@ class GoalState:
     """Serializable goal state stored per session."""
 
     goal: str
-    status: str = "active"          # active | paused | done | cleared
+    status: str = "active"          # active | paused | done | blocked | cleared
     turns_used: int = 0
     max_turns: int = DEFAULT_MAX_TURNS
     created_at: float = 0.0
     last_turn_at: float = 0.0
-    last_verdict: Optional[str] = None        # "done" | "continue" | "skipped"
+    last_verdict: Optional[str] = None        # "done" | "blocked" | "continue" | "wait" | "skipped"
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
@@ -864,7 +868,7 @@ def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, 
     """Parse the judge's reply. Fail-open on unusable output.
 
     Returns ``(verdict, reason, parse_failed, wait_directive)`` where:
-      - ``verdict`` is ``"done"``, ``"continue"``, or ``"wait"``.
+      - ``verdict`` is ``"done"``, ``"blocked"``, ``"continue"``, or ``"wait"``.
       - ``parse_failed`` is True when the judge returned output that couldn't
         be interpreted as the expected JSON verdict (empty body, prose,
         malformed JSON). Callers use it to auto-pause after N consecutive
@@ -921,7 +925,16 @@ def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, 
             done = bool(done_val)
         verdict = "done" if done else "continue"
 
-    if verdict not in {"done", "continue", "wait"}:
+    # Normalize common aliases the judge may emit for the blocked state into
+    # the canonical "blocked" verdict. Anything still unrecognized after this
+    # falls through to "continue" below (fail-open default).
+    _BLOCKED_ALIASES = {"blocked", "stuck", "stalled", "unachievable",
+                        "impossible", "needs_user", "needs_user_input",
+                        "needs_input", "requires_user", "needs_human"}
+    if verdict in _BLOCKED_ALIASES:
+        verdict = "blocked"
+
+    if verdict not in {"done", "blocked", "continue", "wait"}:
         verdict = "continue"
 
     if verdict != "wait":
@@ -1299,6 +1312,9 @@ class GoalManager:
             return f"⏸ Goal (paused, {meta}{extra}): {s.goal}"
         if s.status == "done":
             return f"✓ Goal done ({meta}): {s.goal}"
+        if s.status == "blocked":
+            extra = f" — {s.last_reason}" if s.last_reason else ""
+            return f"✗ Goal blocked ({meta}{extra}): {s.goal}"
         return f"Goal ({s.status}, {meta}): {s.goal}"
 
     # --- mutation -----------------------------------------------------
@@ -1712,7 +1728,7 @@ class GoalManager:
           - ``status``: current goal status after update
           - ``should_continue``: bool — caller should fire another turn
           - ``continuation_prompt``: str or None
-          - ``verdict``: "done" | "continue" | "wait" | "skipped" | "inactive"
+          - ``verdict``: "done" | "blocked" | "continue" | "wait" | "skipped" | "inactive"
           - ``reason``: str
           - ``message``: user-visible one-liner to print/send
         """
@@ -1839,6 +1855,29 @@ class GoalManager:
                 "verdict": "done",
                 "reason": reason,
                 "message": f"✓ Goal achieved: {reason}",
+            }
+
+        # BLOCKED verdict: the judge decided the goal cannot progress on its
+        # own (unachievable / external dependency / missing decision or
+        # permission / needs user input). Terminate the loop like DONE but
+        # keep a distinct status so callers and audits can tell "we finished"
+        # apart from "we hit a wall."
+        if verdict == "blocked":
+            state.status = "blocked"
+            state.last_reason = reason
+            save_goal(self.session_id, state)
+            return {
+                "status": "blocked",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "blocked",
+                "reason": reason,
+                "message": (
+                    f"✗ Goal blocked: {reason}\n"
+                    "  The goal cannot progress without your input. "
+                    "Use /goal resume after addressing the blocker, "
+                    "or /goal clear to drop it."
+                ),
             }
 
         # Auto-pause when the judge cannot reach the API at all N turns in a

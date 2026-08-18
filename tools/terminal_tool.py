@@ -61,6 +61,59 @@ def _redact_terminal_error_text(value: Any) -> str:
     return redact_sensitive_text("" if value is None else str(value), force=True)
 
 
+_KANBAN_SELF_KILL_SEGMENT_SPLIT = re.compile(r"(?:\|\||&&|[;|\n])")
+
+
+def contains_kanban_worker_self_kill(
+    command: str, own_pids: "Optional[set[int]]" = None
+) -> bool:
+    """True when *command* runs ``kill`` against this kanban worker itself.
+
+    A dispatcher-spawned worker IS the agent process: ``kill <own pid>``
+    (observed in the wild — the model reads its pid from the run record or
+    ``ps`` and tries to "release" the task) makes the dispatcher record the
+    run as ``crashed`` and burn a retry. Only literal-pid ``kill`` shapes are
+    blocked — the worker's own pid, its parent, ``kill 0`` / a negative pgid
+    (both nuke the worker's process group). ``pkill``/pattern kills are left
+    alone: they are pattern-shaped, and the gateway lifecycle guard already
+    covers the dangerous ones.
+    """
+    own: set = set(own_pids) if own_pids is not None else set()
+    if own_pids is None:
+        own = {os.getpid(), os.getppid()}
+        try:
+            own.add(os.getpgrp())
+        except Exception:
+            pass
+    for segment in _KANBAN_SELF_KILL_SEGMENT_SPLIT.split(command or ""):
+        try:
+            tokens = shlex.split(segment, comments=True)
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+        prog = tokens[0].rsplit("/", 1)[-1]
+        if prog != "kill":
+            continue
+        args = tokens[1:]
+        seen_dashdash = False
+        for i, tok in enumerate(args):
+            if tok == "--":
+                seen_dashdash = True
+                continue
+            if tok.startswith("-") and not seen_dashdash:
+                # `-9` / `-TERM` / `-s` in flag position is a signal spec,
+                # not a target. A negative pgid target requires `--` first.
+                continue
+            try:
+                pid = int(tok)
+            except ValueError:
+                continue
+            if pid == 0 or pid in own or (pid < 0 and -pid in own):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Global interrupt event: set by the agent when a user interrupt arrives.
 # The terminal tool polls this during command execution so it can kill
@@ -2879,6 +2932,25 @@ def terminal_tool(
                         "kill this command before it could complete (SIGTERM propagates "
                         "to child processes). Run `hermes gateway restart` from a "
                         "separate shell outside the running gateway."
+                    ),
+                    "status": "error",
+                }, ensure_ascii=False)
+
+        # Hard-block: a kanban worker killing its own process. The dispatcher
+        # records that as `crashed` and burns a retry (observed: the model
+        # reads its pid from the run record and tries to "release" the task
+        # with `kill <pid>`). Finish/park semantics belong to the board tools.
+        if (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+            if contains_kanban_worker_self_kill(command):
+                return json.dumps({
+                    "output": "",
+                    "exit_code": 1,
+                    "error": (
+                        "Blocked: this command would kill the kanban worker's "
+                        "own process, so the dispatcher would record this run "
+                        "as crashed and burn a retry. Do not kill your own "
+                        "pid. Finish the task with kanban_complete, or park "
+                        "it with kanban_block."
                     ),
                     "status": "error",
                 }, ensure_ascii=False)

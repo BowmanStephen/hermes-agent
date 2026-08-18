@@ -159,6 +159,110 @@ describe('scanDiskPlugins (#66899)', () => {
       delete (globalThis as unknown as { __uniRegister?: unknown }).__uniRegister
     }
   })
+
+  it('waits for a hot-edited entry file to settle before importing it', async () => {
+    desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
+    agentPluginsRoot.mockResolvedValue('')
+    readDir.mockResolvedValue({
+      entries: [{ isDirectory: true, name: 'race', path: '/local/.hermes/desktop-plugins/race' }]
+    })
+
+    const register = vi.fn()
+    ;(globalThis as unknown as { __raceRegister: unknown }).__raceRegister = register
+    const valid = 'export default { id: "race", register: globalThis.__raceRegister }'
+    const partial = '<<<<<<< HEAD\nexport default { id: "race", register: globalThis.__raceRegister }'
+    let reads = 0
+
+    readFileText.mockImplementation(async () => {
+      reads += 1
+
+      // The first load sees a valid-before-save read followed by a partial
+      // read. The second attempt sees two partial/final transition reads;
+      // only the third attempt gets two identical final reads.
+      if (reads === 1) {
+        return { text: valid }
+      }
+
+      if (reads <= 3) {
+        return { text: partial }
+      }
+
+      return { text: valid }
+    })
+    watchPreviewFile.mockResolvedValue({ id: 'w-race' })
+
+    const createObjectURL = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockImplementation(
+        blob =>
+          `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
+      )
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const RealBlob = globalThis.Blob
+    vi.stubGlobal(
+      'Blob',
+      class {
+        parts: string[]
+        constructor(parts: string[]) {
+          this.parts = parts
+        }
+      }
+    )
+
+    try {
+      await discoverRuntimePlugins()
+
+      expect(register).toHaveBeenCalledTimes(1)
+      expect(reads).toBeGreaterThanOrEqual(5)
+    } finally {
+      createObjectURL.mockRestore()
+      revokeObjectURL.mockRestore()
+      vi.stubGlobal('Blob', RealBlob)
+      delete (globalThis as unknown as { __raceRegister?: unknown }).__raceRegister
+    }
+  })
+
+  it('reports a plugin that never settles after the final import attempt', async () => {
+    desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
+    agentPluginsRoot.mockResolvedValue('')
+    readDir.mockResolvedValue({
+      entries: [{ isDirectory: true, name: 'broken', path: '/local/.hermes/desktop-plugins/broken' }]
+    })
+
+    const partial = '<<<<<<< HEAD\nexport default { id: "broken", register() {} }'
+    readFileText.mockResolvedValue({ text: partial })
+    watchPreviewFile.mockResolvedValue({ id: 'w-broken' })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const createObjectURL = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockImplementation(
+        blob =>
+          `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
+      )
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const RealBlob = globalThis.Blob
+    vi.stubGlobal(
+      'Blob',
+      class {
+        parts: string[]
+        constructor(parts: string[]) {
+          this.parts = parts
+        }
+      }
+    )
+
+    try {
+      await discoverRuntimePlugins()
+
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('runtime load failed (broken)'), expect.any(Error))
+      expect($pluginRecords.get().broken).toMatchObject({ status: 'error' })
+    } finally {
+      error.mockRestore()
+      createObjectURL.mockRestore()
+      revokeObjectURL.mockRestore()
+      vi.stubGlobal('Blob', RealBlob)
+    }
+  })
 })
 
 describe('watchRuntimePlugins dir watch (#66899)', () => {

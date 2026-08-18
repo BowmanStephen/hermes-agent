@@ -46,10 +46,14 @@ interface LoadOptions {
   integrity?: string
   /** Inventory bucket; the disk door is the default runtime source. */
   kind?: PluginKind
+  /** Suppress the user-facing error while a disk write is being retried. */
+  reportErrors?: boolean
 }
 
 /** Live runtime plugins: id -> disposers (unload/reload support). */
 const loaded = new Map<string, (() => void)[]>()
+const DISK_LOAD_ATTEMPTS = 3
+const DISK_SETTLE_DELAY_MS = 25
 
 // Matches the specifier of a static `from '…'`, a side-effect `import '…'`, or
 // a dynamic `import('…')` — anchored to import/export syntax so a bare string
@@ -171,16 +175,18 @@ export async function loadRuntimePlugin(
 
     return plugin.id
   } catch (error) {
-    console.error(`[plugins] runtime load failed (${origin})`, error)
-    notifyError(error, `Plugin "${origin}" failed to load`)
-    publishPlugin({
-      id: origin,
-      name: origin,
-      kind: options.kind ?? 'disk',
-      file: options.file,
-      status: 'error',
-      error: error instanceof Error ? error.message : String(error)
-    })
+    if (options.reportErrors !== false) {
+      console.error(`[plugins] runtime load failed (${origin})`, error)
+      notifyError(error, `Plugin "${origin}" failed to load`)
+      publishPlugin({
+        id: origin,
+        name: origin,
+        kind: options.kind ?? 'disk',
+        file: options.file,
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
 
     return null
   }
@@ -275,32 +281,76 @@ function dropOriginRecord(origin: string, except: DiskPlugin): void {
   dropPlugin(origin)
 }
 
-async function loadDiskPlugin(entry: DiskPlugin): Promise<void> {
+function waitForDiskWrite(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, DISK_SETTLE_DELAY_MS))
+}
+
+/**
+ * A file watcher can fire after truncate but before the writer has finished
+ * replacing plugin.js. Require two identical reads before handing source to
+ * the ESM parser; otherwise a mid-save `<<<<<<<` or truncated string becomes
+ * a noisy runtime syntax error even though the final file is valid.
+ */
+async function readStablePluginSource(file: string, allowUnstable: boolean): Promise<null | string> {
   const desktop = window.hermesDesktop!
+  const first = (await desktop.readFileText(file)).text
+
+  await waitForDiskWrite()
+
+  const second = (await desktop.readFileText(file)).text
+
+  // On the final attempt, use the newest read even if the writer still has
+  // not settled. That preserves the final-attempt error report for a plugin
+  // that remains syntactically invalid instead of failing silently.
+  return first === second || allowUnstable ? second : null
+}
+
+async function loadDiskPlugin(entry: DiskPlugin): Promise<void> {
   const prevId = entry.id
 
   try {
-    const { text } = await desktop.readFileText(entry.file)
+    for (let attempt = 0; attempt < DISK_LOAD_ATTEMPTS; attempt += 1) {
+      const text = await readStablePluginSource(entry.file, attempt === DISK_LOAD_ATTEMPTS - 1)
 
-    const id = await loadRuntimePlugin(text, entry.origin, {
-      defaultEnabled: entry.defaultEnabled,
-      file: entry.file
-    })
+      if (text === null) {
+        if (attempt < DISK_LOAD_ATTEMPTS - 1) {
+          await waitForDiskWrite()
+        }
 
-    // A hot-edit that changes `plugin.id`: loadRuntimePlugin only disposes the
-    // NEW id, so unload the previous incarnation here or its contributions +
-    // inventory row orphan.
-    if (id && prevId && prevId !== id) {
-      unloadRuntimePlugin(prevId)
-      dropPlugin(prevId)
-    }
+        continue
+      }
 
-    entry.id = id ?? entry.id
+      const id = await loadRuntimePlugin(text, entry.origin, {
+        defaultEnabled: entry.defaultEnabled,
+        file: entry.file,
+        reportErrors: attempt === DISK_LOAD_ATTEMPTS - 1
+      })
 
-    // A fixing save under a different plugin id — drop the folder-named
-    // error record so the inventory shows one row, not a ghost.
-    if (id && id !== entry.origin) {
-      dropOriginRecord(entry.origin, entry)
+      if (!id) {
+        if (attempt < DISK_LOAD_ATTEMPTS - 1) {
+          await waitForDiskWrite()
+        }
+
+        continue
+      }
+
+      // A hot-edit that changes `plugin.id`: loadRuntimePlugin only disposes the
+      // NEW id, so unload the previous incarnation here or its contributions +
+      // inventory row orphan.
+      if (prevId && prevId !== id) {
+        unloadRuntimePlugin(prevId)
+        dropPlugin(prevId)
+      }
+
+      entry.id = id
+
+      // A fixing save under a different plugin id — drop the folder-named
+      // error record so the inventory shows one row, not a ghost.
+      if (id !== entry.origin) {
+        dropOriginRecord(entry.origin, entry)
+      }
+
+      return
     }
   } catch {
     // File vanished mid-read — the next scan reconciles.

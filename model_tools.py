@@ -461,6 +461,21 @@ def _compute_tool_definitions(
     # This ensures that even if a composite toolset (like hermes-cli)
     # is enabled, any tools belonging to a disabled toolset are strictly
     # stripped out. See issue #17309.
+    if (
+        disabled_toolsets
+        and "kanban" in disabled_toolsets
+        and os.environ.get("HERMES_KANBAN_TASK")
+        and not _is_delegated_child_context()
+        and _is_dispatcher_owned_worker()
+    ):
+        # A profile may disable the kanban toolset to hide board tools from
+        # its chat sessions, but a dispatcher-spawned worker must ALWAYS keep
+        # the lifecycle handoff surface (complete/block/heartbeat) — the same
+        # invariant as the enabled-append above. Without it the worker can
+        # never close its task: the kanban stop-guard nudges it in a loop
+        # until the iteration budget exhausts and the run records as
+        # timed_out/crashed.
+        disabled_toolsets = [t for t in disabled_toolsets if t != "kanban"]
     if disabled_toolsets:
         for toolset_name in disabled_toolsets:
             if validate_toolset(toolset_name):

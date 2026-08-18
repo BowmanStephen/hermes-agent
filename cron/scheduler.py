@@ -2289,10 +2289,22 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 from gateway.config import PlatformConfig
                 pconfig = PlatformConfig(enabled=True)
         elif not pconfig or not pconfig.enabled:
-            msg = f"platform '{platform_name}' not configured/enabled"
-            logger.warning("Job '%s': %s", job["id"], msg)
-            delivery_errors.append(msg)
-            continue
+            # Multiplex-host carve-out: a profile served via profile_routes
+            # deliberately disables platforms the HOST gateway's adapter
+            # fronts, so the profile-scoped config gate must not reject a
+            # live adapter the multiplex ticker passed in — same reasoning
+            # as the relay carve-out above. Without a live adapter (e.g. a
+            # standalone profile gateway run) the gate still fails closed.
+            host_adapter = (adapters or {}).get(platform)
+            if host_adapter is not None:
+                from gateway.config import PlatformConfig
+                pconfig = PlatformConfig(enabled=True)
+                runtime_adapter = host_adapter
+            else:
+                msg = f"platform '{platform_name}' not configured/enabled"
+                logger.warning("Job '%s': %s", job["id"], msg)
+                delivery_errors.append(msg)
+                continue
 
         # Prefer the resolved live transport when the gateway is running. This
         # supports E2EE native adapters and relay-fronted logical platforms.

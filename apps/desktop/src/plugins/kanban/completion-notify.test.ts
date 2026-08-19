@@ -157,6 +157,7 @@ describe('authoritative baseline', () => {
 
     // Fire the frame before the baseline resolves.
     const pending = m.onKanbanEventsFrame('smoke', [ev(100, 'created'), ev(105, 'completed')])
+    await vi.waitFor(() => expect(rest).toHaveBeenCalled())
     resolveBoard({ latest_event_id: 100 })
     const fired = await pending
 
@@ -310,17 +311,91 @@ describe('board isolation', () => {
   })
 })
 
-describe('ambiguous alias', () => {
-  it("empty slug ('' = server current board) is suppressed and never queried", async () => {
-    const rest = makeRest(() => 100)
+describe('current-board alias', () => {
+  /** Rest stub that also answers GET /boards with a current slug. */
+  function makeRestWithBoards(current: string, latest: () => number) {
+    return vi.fn(async (path: string) => {
+      if (path === '/boards') {
+        return { current, boards: [] }
+      }
+
+      if (path.startsWith('/board')) {
+        return { latest_event_id: latest() }
+      }
+
+      throw new Error(`unexpected rest call: ${path}`)
+    })
+  }
+
+  it("empty slug ('' = server current board) resolves via GET /boards and notifies", async () => {
+    const rest = makeRestWithBoards('fleet', () => 100)
     const m = await loadModule()
     m.bindCompletionNotify(rest as never)
 
-    const fired = await m.onKanbanEventsFrame('', [ev(101, 'completed')])
+    const fired = await m.onKanbanEventsFrame('', [ev(101, 'completed', { summary: 'Done' })])
 
-    expect(fired).toBe(false)
+    expect(fired).toBe(true)
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+    expect(rest).toHaveBeenCalledWith('/boards')
+    expect(rest).toHaveBeenCalledWith('/board?board=fleet')
+  })
+
+  it("'' and the explicit current slug share one cursor (no double-notify)", async () => {
+    const rest = makeRestWithBoards('fleet', () => 100)
+    const m = await loadModule()
+    m.bindCompletionNotify(rest as never)
+
+    await m.onKanbanEventsFrame('', [ev(101, 'completed')])
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+
+    // The same event arriving under the explicit slug is history, not new.
+    const again = await m.onKanbanEventsFrame('fleet', [ev(101, 'completed')])
+
+    expect(again).toBe(false)
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolution is memoized: one GET /boards across frames', async () => {
+    const rest = makeRestWithBoards('fleet', () => 100)
+    const m = await loadModule()
+    m.bindCompletionNotify(rest as never)
+
+    await m.onKanbanEventsFrame('', [ev(101, 'completed')])
+    await m.onKanbanEventsFrame('', [ev(102, 'completed')])
+
+    expect(rest.mock.calls.filter(call => call[0] === '/boards')).toHaveLength(1)
+  })
+
+  it('resolution failure is fail-closed for the frame and retried on the next', async () => {
+    let failBoards = true
+
+    const rest = vi.fn(async (path: string) => {
+      if (path === '/boards') {
+        if (failBoards) {
+          throw new Error('boards unavailable')
+        }
+
+        return { current: 'fleet', boards: [] }
+      }
+
+      if (path.startsWith('/board')) {
+        return { latest_event_id: 100 }
+      }
+
+      throw new Error(`unexpected rest call: ${path}`)
+    })
+
+    const m = await loadModule()
+    m.bindCompletionNotify(rest as never)
+
+    const fired1 = await m.onKanbanEventsFrame('', [ev(101, 'completed')])
+    expect(fired1).toBe(false)
     expect(hostMock.notify).not.toHaveBeenCalled()
-    expect(rest).not.toHaveBeenCalled()
+
+    failBoards = false
+    const fired2 = await m.onKanbanEventsFrame('', [ev(101, 'completed')])
+    expect(fired2).toBe(true)
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
   })
 })
 

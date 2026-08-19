@@ -24,7 +24,11 @@
  * kinds emit. Reconnect replays from 0; cursor filters. Board switch never
  * mixes cursors; returning reuses prior cursor (never reset to current MAX).
  * Fail-closed: while a board's baseline is unknown, no event can be
- * classified so none is notified. Empty slug ('') suppressed.
+ * classified so none is notified. Empty slug ('' = the server's current
+ * board — the desktop's default state) is resolved to the concrete slug via
+ * GET /boards before any cursor work, so cursors are always keyed by a real
+ * board and the default state still notifies. Resolution failure is
+ * fail-closed for that frame and retried on the next.
  */
 
 import { host, type PluginOs, type PluginRestOptions, type PluginTranslate } from '@hermes/plugin-sdk'
@@ -61,6 +65,28 @@ let rest: Rest | null = null
 let translate: PluginTranslate | null = null
 let osDoor: PluginOs | null = null
 
+/** Memoized '' → concrete current-board resolution. Shares the lifetime of
+ *  the events socket that carries '' frames: bindCompletionNotify (re)sets it,
+ *  a failed fetch clears it so the next frame retries. */
+let currentSlugPromise: Promise<string> | null = null
+
+function resolveSlug(slug: string): Promise<string> {
+  if (slug !== '') {
+    return Promise.resolve(slug)
+  }
+
+  currentSlugPromise ??= rest!<{ current?: unknown }>('/boards').then(
+    boards => (typeof boards.current === 'string' ? boards.current : ''),
+    () => {
+      currentSlugPromise = null // retry on the next frame
+
+      return ''
+    }
+  )
+
+  return currentSlugPromise
+}
+
 /** Resolve a dot-path against the plugin's own English bundle — the same
  *  last-rung fallback the plugin i18n registry applies, usable before (or
  *  without) a bound translator. */
@@ -89,6 +115,7 @@ export function bindCompletionNotify(r: Rest, pluginTranslate?: PluginTranslate,
   rest = r
   translate = pluginTranslate ?? null
   osDoor = os ?? null
+  currentSlugPromise = null
 }
 
 async function ensureBaseline(slug: string): Promise<void> {
@@ -178,7 +205,16 @@ function notifyOne(kind: string, spec: { titleKey: string; toast: ToastKind }, e
  *  notification was fired. Never throws: notification failure cannot
  *  interfere with api.ts cache invalidation. */
 export async function onKanbanEventsFrame(slug: string, events?: CompletionEvent[]): Promise<boolean> {
-  if (!events?.length || slug === '' || !rest) {
+  if (!events?.length || !rest) {
+    return false
+  }
+
+  // '' = the server's current board (the desktop's default state). Resolve to
+  // the concrete slug so the cursor is keyed by a real board; fail-closed on
+  // resolution failure (retried next frame).
+  slug = await resolveSlug(slug)
+
+  if (slug === '' || !rest) {
     return false
   }
 

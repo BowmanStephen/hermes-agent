@@ -13,6 +13,7 @@ import {
   cn,
   Codicon,
   compactNumber,
+  ConfirmDialog,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -578,6 +579,11 @@ function NewTaskDialog({
   const [error, setError] = useState<null | string>(null)
   const [estimate, setEstimate] = useState<null | TaskEstimate>(null)
 
+  // One key per dialog-open. If create succeeds but the follow-up move fails,
+  // clicking Create again re-sends the same key and the backend returns the
+  // existing task instead of writing a duplicate.
+  const [idemKey, setIdemKey] = useState('')
+
   // Rough effort estimate from the typed title/body (before the task exists),
   // via the auto-routed auxiliary model. Makes a model call — explicit action.
   const estMut = useMutation({
@@ -610,6 +616,7 @@ function NewTaskDialog({
       setError(null)
       setBusy(false)
       setEstimate(null)
+      setIdemKey(crypto.randomUUID())
     }
   }, [target, boardDefaultKind])
 
@@ -635,6 +642,7 @@ function NewTaskDialog({
         assignee: assignee === PARKED ? undefined : assignee || resolvedDefault,
         body: bodyText.trim() || undefined,
         goal_mode: goalMode,
+        idempotency_key: idemKey || undefined,
         parents: parent ? [parent] : undefined,
         priority: Number(priority) || 0,
         skills: skillList.length ? skillList : undefined,
@@ -1004,6 +1012,7 @@ function SelectionBar({
   // One menu at a time — controlled, so a click on the second trigger can
   // never race Radix's dismiss layer into two open menus.
   const [menu, setMenu] = useState<'assign' | 'move' | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center px-4">
@@ -1060,7 +1069,7 @@ function SelectionBar({
         <Button
           className="text-destructive"
           disabled={busy}
-          onClick={() => bulkDelete.mutate()}
+          onClick={() => setConfirmDelete(true)}
           size="xs"
           variant="ghost"
         >
@@ -1073,6 +1082,18 @@ function SelectionBar({
           </Button>
         </Tip>
       </div>
+
+      <ConfirmDialog
+        confirmLabel={k.delete}
+        description={k.deleteConfirmBody}
+        destructive
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={async () => {
+          await bulkDelete.mutateAsync()
+        }}
+        open={confirmDelete}
+        title={k.deleteConfirmTitle(selected.size)}
+      />
     </div>
   )
 }
@@ -1094,6 +1115,7 @@ export function KanbanBoardPage() {
   })
 
   const [openId, setOpenId] = useState<null | string>(null)
+  const [pendingDelete, setPendingDelete] = useState<null | string>(null)
   const [addStatus, setAddStatus] = useState<null | string>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -1402,7 +1424,7 @@ export function KanbanBoardPage() {
                 columns={columnNames}
                 key={col.name}
                 onAdd={setAddStatus}
-                onDelete={id => deleteMut.mutate(id)}
+                onDelete={setPendingDelete}
                 onDropTask={onMove}
                 onMove={onMove}
                 onOpen={setOpenId}
@@ -1426,6 +1448,20 @@ export function KanbanBoardPage() {
 
       <NewTaskDialog onClose={() => setAddStatus(null)} parents={parentOptions} target={addStatus} />
       <TaskDrawer columns={columnNames} id={openId} onClose={() => setOpenId(null)} onOpen={setOpenId} />
+
+      <ConfirmDialog
+        confirmLabel={k.delete}
+        description={k.deleteConfirmBody}
+        destructive
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteMut.mutate(pendingDelete)
+          }
+        }}
+        open={pendingDelete !== null}
+        title={k.deleteConfirmTitle(1)}
+      />
     </div>
   )
 }

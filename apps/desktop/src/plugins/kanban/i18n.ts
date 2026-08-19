@@ -153,6 +153,8 @@ type KanbanMessages = {
   workerRestarted: string
   workerStopped: string
   lastFailureTitle: (n: number) => string
+  deleteConfirmTitle: (n: number) => string
+  deleteConfirmBody: string
   notePosted: string
   activity: (n: number) => string
   runs: (n: number) => string
@@ -363,6 +365,8 @@ export const en: KanbanMessages = {
   workerRestarted: 'Worker restarted from scratch',
   workerStopped: 'Worker stopped — task parked in To-do',
   lastFailureTitle: n => (n > 1 ? `Last failure · ${n} in a row` : 'Last failure'),
+  deleteConfirmTitle: n => (n > 1 ? `Delete ${n} tasks?` : 'Delete this task?'),
+  deleteConfirmBody: 'Permanently removes the task with its comments, runs, and history. Archive keeps the record.',
   notePosted: 'Note posted — worker requeued',
   activity: n => `Activity · ${n}`,
   runs: n => `Runs · ${n}`,
@@ -571,6 +575,8 @@ const ja: KanbanMessages = {
   workerRestarted: 'ワーカーを最初から再起動しました',
   workerStopped: 'ワーカーを停止 — タスクは To-do に退避しました',
   lastFailureTitle: n => (n > 1 ? `直近の失敗 · ${n} 回連続` : '直近の失敗'),
+  deleteConfirmTitle: n => (n > 1 ? `${n} 件のタスクを削除しますか？` : 'このタスクを削除しますか？'),
+  deleteConfirmBody: 'タスクとそのコメント・実行履歴を完全に削除します。記録を残すにはアーカイブを使ってください。',
   notePosted: 'メモを投稿しました — ワーカーを再キューしました',
   activity: n => `アクティビティ・${n}`,
   runs: n => `実行・${n}`,
@@ -777,6 +783,8 @@ const zh: KanbanMessages = {
   workerRestarted: '工作进程已从头重启',
   workerStopped: '工作进程已停止 — 任务移至待办',
   lastFailureTitle: n => (n > 1 ? `最近失败 · 连续 ${n} 次` : '最近失败'),
+  deleteConfirmTitle: n => (n > 1 ? `删除 ${n} 个任务？` : '删除此任务？'),
+  deleteConfirmBody: '将永久删除任务及其评论、运行记录和历史。如需保留记录请使用归档。',
   notePosted: '备注已发布 — 工作单元已重新入队',
   activity: n => `活动・${n}`,
   runs: n => `运行・${n}`,
@@ -982,6 +990,8 @@ const zhHant: KanbanMessages = {
   workerRestarted: '工作程序已從頭重新啟動',
   workerStopped: '工作程序已停止 — 任務移至待辦',
   lastFailureTitle: n => (n > 1 ? `最近失敗 · 連續 ${n} 次` : '最近失敗'),
+  deleteConfirmTitle: n => (n > 1 ? `刪除 ${n} 個任務？` : '刪除此任務？'),
+  deleteConfirmBody: '將永久刪除任務及其留言、執行紀錄與歷史。如需保留紀錄請使用封存。',
   notePosted: '備註已發布 — 工作單元已重新排入佇列',
   activity: n => `活動・${n}`,
   runs: n => `執行・${n}`,

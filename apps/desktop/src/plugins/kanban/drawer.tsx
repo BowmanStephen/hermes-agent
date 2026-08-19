@@ -11,6 +11,7 @@ import {
   cn,
   Codicon,
   compactNumber,
+  ConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -551,6 +552,7 @@ export function TaskDrawer({
   const k = useKanban()
   const qc = useQueryClient()
   const slug = useValue($boardSlug)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
@@ -789,7 +791,7 @@ export function TaskDrawer({
                     <Codicon name="archive" size="0.85rem" />
                     {k.archiveTask}
                   </DropdownMenuItem>
-                  <DropdownMenuItem className="text-destructive" onSelect={mutate(() => deleteTask(task.id), onClose)}>
+                  <DropdownMenuItem className="text-destructive" onSelect={() => setConfirmDelete(true)}>
                     <Codicon name="trash" size="0.85rem" />
                     {k.deleteTask}
                   </DropdownMenuItem>
@@ -1039,6 +1041,20 @@ export function TaskDrawer({
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        confirmLabel={k.deleteTask}
+        description={k.deleteConfirmBody}
+        destructive
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={async () => {
+          await deleteTask(id)
+          invalidate()
+          onClose()
+        }}
+        open={confirmDelete}
+        title={k.deleteConfirmTitle(1)}
+      />
     </div>
   )
 }

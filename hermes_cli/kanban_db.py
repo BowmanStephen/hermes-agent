@@ -757,6 +757,31 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     return board_dir(slug) / "workspaces"
 
 
+def _worker_board_paths(board: Optional[str]) -> tuple[Path, Path, str]:
+    """Resolve worker paths from an explicit board, ignoring inherited pins.
+
+    ``HERMES_KANBAN_DB`` and ``HERMES_KANBAN_WORKSPACES_ROOT`` are useful
+    legacy overrides, but a gateway can have them set for its own active
+    board.  A dispatcher worker receiving an explicit ``board=`` must not let
+    those process-wide values redirect it to another board.  Keep the normal
+    env-based resolution when no board was supplied (standalone dispatchers
+    intentionally use their configured active board).
+    """
+    if board is None:
+        return kanban_db_path(), workspaces_root(), get_current_board()
+
+    slug = _normalize_board_slug(board) or DEFAULT_BOARD
+    root = kanban_home()
+    board_root = root / "kanban" / "boards" / slug
+    if slug == DEFAULT_BOARD:
+        return (
+            root / "kanban.db",
+            root / "kanban" / "workspaces",
+            slug,
+        )
+    return board_root / "kanban.db", board_root / "workspaces", slug
+
+
 def attachments_root(board: Optional[str] = None) -> Path:
     """Return the directory under which task file attachments are stored.
 
@@ -10818,13 +10843,13 @@ def _default_spawn(
     # dispatcher's. Belt-and-braces with the `get_default_hermes_root()`
     # resolution in `kanban_home()` — symmetric resolution is the norm,
     # but unusual symlink / Docker layouts are caught here too.
-    env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
-    env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
+    worker_db, worker_workspaces, resolved_board = _worker_board_paths(board)
+    env["HERMES_KANBAN_DB"] = str(worker_db)
+    env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(worker_workspaces)
     _retag_legacy_worker_sessions(env["HERMES_KANBAN_WORKSPACES_ROOT"])
     # Board slug — the final defense-in-depth pin. If the worker ever
     # resolves kanban paths without the DB / workspaces env vars, the
     # board slug still forces it to the right directory.
-    resolved_board = _normalize_board_slug(board) or get_current_board()
     env["HERMES_KANBAN_BOARD"] = resolved_board
     # HERMES_PROFILE is the author the kanban_comment tool defaults to.
     # `hermes -p <assignee>` activates the profile, but the env var is

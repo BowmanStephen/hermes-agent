@@ -105,6 +105,56 @@ class TestPathResolution:
         assert kb.kanban_db_path() == forced
         assert kb.kanban_db_path(board="ignored") == forced
 
+    def test_worker_spawn_scopes_inherited_pins_to_explicit_board(
+        self, fresh_home, tmp_path, monkeypatch
+    ):
+        """A worker on a named board must not inherit the gateway's board pins."""
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, _cmd, **kwargs):
+                captured["env"] = kwargs["env"]
+                self.pid = 4242
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "fleet" / "kanban.db"))
+        monkeypatch.setenv(
+            "HERMES_KANBAN_WORKSPACES_ROOT",
+            str(tmp_path / "fleet" / "workspaces"),
+        )
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "fleet")
+
+        task = kb.Task(
+            id="t_worker_board_scope",
+            title="x",
+            body=None,
+            assignee="coder",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=None,
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+        )
+        workspace = tmp_path / "worker-workspace"
+        workspace.mkdir()
+
+        kb._default_spawn(task, str(workspace), board="worker-plumbing-smoke")
+
+        env = captured["env"]
+        board_root = fresh_home / "kanban" / "boards" / "worker-plumbing-smoke"
+        assert env["HERMES_KANBAN_BOARD"] == "worker-plumbing-smoke"
+        assert env["HERMES_KANBAN_DB"] == str(board_root / "kanban.db")
+        assert env["HERMES_KANBAN_WORKSPACES_ROOT"] == str(
+            board_root / "workspaces"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Current-board resolution

@@ -774,3 +774,33 @@ class TestEdgeCases:
         assert "Unknown" in text
 
 
+def test_task_aggregation_reports_average_latency_per_task():
+    """Per-task latency averages must include each turn's duration."""
+    rows = [
+        {
+            "task_id": "task-1",
+            "turn_id": "turn-1",
+            "started_at": 1.0,
+            "latency_ms": 100.0,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "estimated_cost_usd": 0.01,
+            "outcome": "completed",
+        },
+        {
+            "task_id": "task-1",
+            "turn_id": "turn-2",
+            "started_at": 2.0,
+            "latency_ms": 300.0,
+            "input_tokens": 20,
+            "output_tokens": 10,
+            "estimated_cost_usd": 0.02,
+            "outcome": "completed",
+        },
+    ]
+
+    report = InsightsEngine._compute_task_telemetry(rows)
+
+    assert report["by_task"][0]["avg_latency_ms"] == pytest.approx(200.0)
+
+

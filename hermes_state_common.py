@@ -216,7 +216,7 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
     )
 
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 
 # FTS storage-layout version, tracked INDEPENDENTLY of SCHEMA_VERSION in the
@@ -363,6 +363,39 @@ CREATE TABLE IF NOT EXISTS session_model_usage (
     PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
 );
 
+-- One row per workflow turn.  ``session_model_usage`` remains the aggregate
+-- per-model ledger; this table is the task-level event stream used by cost /
+-- outcome dashboards.  Token and cost deltas are written through the same
+-- transaction as the existing session accounting path, so a live task row
+-- cannot drift from the session totals.
+CREATE TABLE IF NOT EXISTS task_telemetry (
+    turn_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    session_id TEXT,
+    model TEXT,
+    provider TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    latency_ms REAL,
+    api_latency_ms REAL NOT NULL DEFAULT 0,
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd REAL NOT NULL DEFAULT 0,
+    actual_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    outcome TEXT,
+    quality_score REAL,
+    breakdown_json TEXT,
+    budget_json TEXT,
+    budget_alert TEXT,
+    error TEXT
+);
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -429,6 +462,8 @@ CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(ex
 CREATE INDEX IF NOT EXISTS idx_session_turn_leases_expires ON session_turn_leases(expires_at);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
+CREATE INDEX IF NOT EXISTS idx_task_telemetry_task ON task_telemetry(task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_telemetry_session ON task_telemetry(session_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 """

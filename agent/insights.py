@@ -159,6 +159,7 @@ class InsightsEngine:
 
         # Gather raw data
         sessions = self._get_sessions(cutoff, source)
+        task_rows = self._get_task_telemetry(cutoff, source)
         tool_usage = self._get_tool_usage(cutoff, source)
         skill_usage = self._get_skill_usage(cutoff, source)
         message_stats = self._get_message_stats(cutoff, source)
@@ -183,6 +184,7 @@ class InsightsEngine:
                 },
                 "activity": {},
                 "top_sessions": [],
+                "tasks": self._compute_task_telemetry(task_rows),
             }
 
         # Compute insights
@@ -193,6 +195,7 @@ class InsightsEngine:
         skills = self._compute_skill_breakdown(skill_usage)
         activity = self._compute_activity_patterns(sessions)
         top_sessions = self._compute_top_sessions(sessions)
+        tasks = self._compute_task_telemetry(task_rows)
 
         return {
             "days": days,
@@ -206,6 +209,7 @@ class InsightsEngine:
             "skills": skills,
             "activity": activity,
             "top_sessions": top_sessions,
+            "tasks": tasks,
         }
 
     def get_usage_breakdown(self, days: int = 30, source: str = None) -> Dict[str, Any]:
@@ -218,9 +222,11 @@ class InsightsEngine:
         cutoff = time.time() - (days * 86400)
         tool_usage = self._get_tool_usage(cutoff, source)
         skill_usage = self._get_skill_usage(cutoff, source)
+        task_rows = self._get_task_telemetry(cutoff, source)
         return {
             "tools": self._compute_tool_breakdown(tool_usage),
             "skills": self._compute_skill_breakdown(skill_usage),
+            "tasks": self._compute_task_telemetry(task_rows),
         }
 
     # =========================================================================
@@ -301,6 +307,146 @@ class InsightsEngine:
         else:
             cursor = self._conn.execute(self._GET_SESSIONS_ALL, (cutoff,))
         return [dict(row) for row in cursor.fetchall()]
+
+    _GET_TASK_TELEMETRY_WITH_SOURCE = (
+        "SELECT t.* FROM task_telemetry t "
+        "JOIN sessions s ON s.id = t.session_id "
+        "WHERE s.started_at >= ? AND s.source = ? "
+        "ORDER BY t.started_at DESC"
+    )
+    _GET_TASK_TELEMETRY_ALL = (
+        "SELECT t.* FROM task_telemetry t "
+        "JOIN sessions s ON s.id = t.session_id "
+        "WHERE s.started_at >= ? "
+        "ORDER BY t.started_at DESC"
+    )
+
+    def _get_task_telemetry(self, cutoff: float, source: str = None) -> List[Dict]:
+        """Fetch task-turn telemetry, tolerating pre-telemetry databases."""
+        try:
+            if source:
+                cursor = self._conn.execute(
+                    self._GET_TASK_TELEMETRY_WITH_SOURCE, (cutoff, source)
+                )
+            else:
+                cursor = self._conn.execute(self._GET_TASK_TELEMETRY_ALL, (cutoff,))
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
+    @staticmethod
+    def _compute_task_telemetry(rows: List[Dict]) -> Dict[str, Any]:
+        """Aggregate task rows without replacing the raw per-turn ledger."""
+        if not rows:
+            return {
+                "summary": {
+                    "turns": 0,
+                    "tasks": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "interrupted": 0,
+                    "partial": 0,
+                    "estimated_cost_usd": 0.0,
+                    "actual_cost_usd": 0.0,
+                    "avg_latency_ms": 0.0,
+                    "avg_quality_score": None,
+                    "budget_alerts": 0,
+                },
+                "by_task": [],
+                "recent": [],
+            }
+
+        grouped: Dict[str, Dict[str, Any]] = {}
+        quality_values = []
+        summary_counts = Counter()
+        total_estimated = 0.0
+        total_actual = 0.0
+        total_latency = 0.0
+        latency_count = 0
+        budget_alerts = 0
+        for row in rows:
+            task_id = str(row.get("task_id") or "unknown")
+            group = grouped.setdefault(
+                task_id,
+                {
+                    "task_id": task_id,
+                    "turns": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                    "actual_cost_usd": 0.0,
+                    "latency_ms": 0.0,
+                    "outcomes": Counter(),
+                    "models": set(),
+                    "budget_alerts": 0,
+                    "last_seen": row.get("started_at"),
+                },
+            )
+            outcome = str(row.get("outcome") or "running")
+            summary_counts[outcome] += 1
+            group["turns"] += 1
+            group["input_tokens"] += int(row.get("input_tokens") or 0)
+            group["output_tokens"] += int(row.get("output_tokens") or 0)
+            group["estimated_cost_usd"] += float(row.get("estimated_cost_usd") or 0.0)
+            group["actual_cost_usd"] += float(row.get("actual_cost_usd") or 0.0)
+            group["outcomes"][outcome] += 1
+            model = row.get("model")
+            if model:
+                group["models"].add(model)
+            if row.get("budget_alert"):
+                group["budget_alerts"] += 1
+                budget_alerts += 1
+            total_estimated += float(row.get("estimated_cost_usd") or 0.0)
+            total_actual += float(row.get("actual_cost_usd") or 0.0)
+            if row.get("latency_ms") is not None:
+                latency_ms = float(row["latency_ms"] or 0.0)
+                group["latency_ms"] += latency_ms
+                total_latency += latency_ms
+                latency_count += 1
+            if row.get("quality_score") is not None:
+                quality_values.append(float(row["quality_score"]))
+
+        by_task = []
+        for group in grouped.values():
+            by_task.append({
+                "task_id": group["task_id"],
+                "turns": group["turns"],
+                "input_tokens": group["input_tokens"],
+                "output_tokens": group["output_tokens"],
+                "total_tokens": group["input_tokens"] + group["output_tokens"],
+                "estimated_cost_usd": group["estimated_cost_usd"],
+                "actual_cost_usd": group["actual_cost_usd"],
+                "avg_latency_ms": (
+                    group["latency_ms"] / group["turns"]
+                    if group["turns"] else 0.0
+                ),
+                "outcomes": dict(group["outcomes"]),
+                "models": sorted(group["models"]),
+                "budget_alerts": group["budget_alerts"],
+                "last_seen": group["last_seen"],
+            })
+        by_task.sort(key=lambda item: item["estimated_cost_usd"], reverse=True)
+
+        return {
+            "summary": {
+                "turns": len(rows),
+                "tasks": len(grouped),
+                "completed": summary_counts.get("completed", 0),
+                "failed": summary_counts.get("failed", 0),
+                "interrupted": summary_counts.get("interrupted", 0),
+                "partial": summary_counts.get("partial", 0),
+                "estimated_cost_usd": total_estimated,
+                "actual_cost_usd": total_actual,
+                "avg_latency_ms": total_latency / latency_count if latency_count else 0.0,
+                "avg_quality_score": (
+                    sum(quality_values) / len(quality_values)
+                    if quality_values else None
+                ),
+                "budget_alerts": budget_alerts,
+            },
+            "by_task": by_task,
+            "recent": rows[:20],
+        }
 
     def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
         """Get tool call counts from messages.
@@ -1035,6 +1181,24 @@ class InsightsEngine:
                 )
             lines.append("")
 
+        # Task-level telemetry: the unit that matters for model/cost decisions.
+        task_summary = (report.get("tasks") or {}).get("summary") or {}
+        if task_summary.get("turns", 0) > 0:
+            lines.append("  🎯 Task Telemetry")
+            lines.append("  " + "─" * 56)
+            lines.append(
+                f"  Turns:              {task_summary['turns']:<12}  Tasks:           {task_summary['tasks']:,}"
+            )
+            lines.append(
+                f"  Completed:          {task_summary['completed']:<12}  Failed:          {task_summary['failed']:,}"
+            )
+            lines.append(
+                f"  Estimated task cost: {_fmt_est_cost(task_summary['estimated_cost_usd'])}"
+            )
+            if task_summary.get("budget_alerts", 0):
+                lines.append(f"  Budget alerts:      {task_summary['budget_alerts']:,}")
+            lines.append("")
+
         # Model breakdown
         if report["models"]:
             lines.append("  🤖 Models Used")
@@ -1162,6 +1326,17 @@ class InsightsEngine:
             cost_parts.append(f"{unknown} unknown")
         if cost_parts:
             lines.append(f"**Cost:** {' | '.join(cost_parts)}")
+            lines.append("")
+
+        task_summary = (report.get("tasks") or {}).get("summary") or {}
+        if task_summary.get("turns", 0) > 0:
+            task_line = (
+                f"**🎯 Tasks:** {task_summary['completed']}/{task_summary['turns']} completed"
+                f" | {_fmt_est_cost(task_summary['estimated_cost_usd'])}"
+            )
+            if task_summary.get("budget_alerts", 0):
+                task_line += f" | ⚠ {task_summary['budget_alerts']} budget alert(s)"
+            lines.append(task_line)
             lines.append("")
 
         # Models (top 5)

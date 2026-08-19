@@ -45,6 +45,7 @@ from agent.turn_context import (
     reanchor_current_turn_user_idx,
 )
 from agent.turn_retry_state import TurnRetryState
+from agent.task_telemetry import with_task_telemetry
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
@@ -3892,6 +3893,9 @@ def run_conversation(
                                 if cost_result.status == "included" else None,
                                 model=agent.model,
                                 api_call_count=1,
+                                task_id=effective_task_id,
+                                turn_id=turn_id,
+                                api_latency_ms=api_duration * 1000.0,
                             )
                         except Exception as e:
                             # Log token persistence failures so they're
@@ -7914,6 +7918,12 @@ def run_conversation(
         _pending_verification_response=_pending_verification_response,
         _pending_verification_response_previewed=_pending_verification_response_previewed,
     )
+
+
+# Keep every early-return and exception path observable.  The wrapper runs
+# outside the large legacy loop so the normal finalizer and its recovery exits
+# share one terminal outcome write without duplicating control flow.
+run_conversation = with_task_telemetry(run_conversation)
 
 
 

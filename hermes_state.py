@@ -6479,11 +6479,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     _TOKEN_DELTA_SUM_FIELDS = (
         "input_tokens", "output_tokens", "cache_read_tokens",
         "cache_write_tokens", "reasoning_tokens", "api_call_count",
+        "api_latency_ms",
     )
     _TOKEN_DELTA_COST_FIELDS = ("estimated_cost_usd", "actual_cost_usd")
     _TOKEN_DELTA_ROUTE_FIELDS = (
         "model", "cost_status", "cost_source", "pricing_version",
         "billing_provider", "billing_base_url", "billing_mode",
+        "task_id", "turn_id",
     )
 
     def queue_token_counts(self, session_id: str, **kwargs) -> None:
@@ -6716,6 +6718,321 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         except Exception:
             pass  # Best effort — never fatal at interpreter shutdown.
 
+    @staticmethod
+    def _decode_task_telemetry_row(row) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        result = dict(row)
+        for column, key in (("breakdown_json", "breakdown"), ("budget_json", "budget")):
+            raw = result.get(column)
+            if raw is None:
+                result[key] = None
+                continue
+            try:
+                result[key] = json.loads(raw)
+            except (TypeError, ValueError):
+                result[key] = None
+        return result
+
+    @staticmethod
+    def _task_budget_alert(
+        *,
+        budget_json: Optional[str],
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+        cache_write_tokens: int,
+        reasoning_tokens: int,
+        estimated_cost_usd: float,
+    ) -> Optional[str]:
+        """Return a durable alert when live usage crosses a task budget."""
+        if not budget_json:
+            return None
+        try:
+            budget = json.loads(budget_json)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(budget, dict):
+            return None
+
+        alerts = []
+        try:
+            max_cost = float(budget.get("max_cost_usd"))
+            if max_cost >= 0 and estimated_cost_usd >= max_cost:
+                alerts.append("cost_limit_exceeded")
+        except (TypeError, ValueError):
+            pass
+        try:
+            max_tokens = int(budget.get("max_tokens"))
+            total_tokens = (
+                input_tokens
+                + output_tokens
+                + cache_read_tokens
+                + cache_write_tokens
+                + reasoning_tokens
+            )
+            if max_tokens >= 0 and total_tokens >= max_tokens:
+                alerts.append("token_limit_exceeded")
+        except (TypeError, ValueError):
+            pass
+        return ",".join(alerts) or None
+
+    def _record_task_telemetry_row(
+        self,
+        conn,
+        *,
+        task_id: str,
+        turn_id: str,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        started_at: Optional[float] = None,
+        ended_at: Optional[float] = None,
+        latency_ms: Optional[float] = None,
+        api_latency_ms: float = 0.0,
+        api_call_count: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: Optional[float] = None,
+        actual_cost_usd: Optional[float] = None,
+        cost_status: Optional[str] = None,
+        cost_source: Optional[str] = None,
+        outcome: Optional[str] = None,
+        quality_score: Optional[float] = None,
+        breakdown: Optional[Dict[str, Any]] = None,
+        budget: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        now = time.time()
+        breakdown_json = (
+            json.dumps(breakdown, ensure_ascii=False, sort_keys=True)
+            if breakdown is not None
+            else None
+        )
+        budget_json = (
+            json.dumps(budget, ensure_ascii=False, sort_keys=True)
+            if budget is not None
+            else None
+        )
+        estimated = float(estimated_cost_usd or 0.0)
+        actual = (
+            float(actual_cost_usd) if actual_cost_usd is not None else None
+        )
+        conn.execute(
+            """INSERT INTO task_telemetry (
+                   turn_id, task_id, session_id, model, provider, started_at,
+                   ended_at, latency_ms, api_latency_ms, api_call_count,
+                   input_tokens, output_tokens, cache_read_tokens,
+                   cache_write_tokens, reasoning_tokens, estimated_cost_usd,
+                   actual_cost_usd, cost_status, cost_source, outcome,
+                   quality_score, breakdown_json, budget_json, budget_alert, error
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(turn_id) DO UPDATE SET
+                   task_id = excluded.task_id,
+                   session_id = COALESCE(excluded.session_id, task_telemetry.session_id),
+                   model = COALESCE(task_telemetry.model, excluded.model),
+                   provider = COALESCE(task_telemetry.provider, excluded.provider),
+                   started_at = MIN(task_telemetry.started_at, excluded.started_at),
+                   ended_at = COALESCE(excluded.ended_at, task_telemetry.ended_at),
+                   latency_ms = COALESCE(excluded.latency_ms, task_telemetry.latency_ms),
+                   api_latency_ms = task_telemetry.api_latency_ms + excluded.api_latency_ms,
+                   api_call_count = task_telemetry.api_call_count + excluded.api_call_count,
+                   input_tokens = task_telemetry.input_tokens + excluded.input_tokens,
+                   output_tokens = task_telemetry.output_tokens + excluded.output_tokens,
+                   cache_read_tokens = task_telemetry.cache_read_tokens + excluded.cache_read_tokens,
+                   cache_write_tokens = task_telemetry.cache_write_tokens + excluded.cache_write_tokens,
+                   reasoning_tokens = task_telemetry.reasoning_tokens + excluded.reasoning_tokens,
+                   estimated_cost_usd = task_telemetry.estimated_cost_usd + excluded.estimated_cost_usd,
+                   actual_cost_usd = CASE
+                       WHEN excluded.actual_cost_usd IS NULL THEN task_telemetry.actual_cost_usd
+                       ELSE COALESCE(task_telemetry.actual_cost_usd, 0) + excluded.actual_cost_usd
+                   END,
+                   cost_status = COALESCE(excluded.cost_status, task_telemetry.cost_status),
+                   cost_source = COALESCE(excluded.cost_source, task_telemetry.cost_source),
+                   outcome = COALESCE(excluded.outcome, task_telemetry.outcome),
+                   quality_score = COALESCE(excluded.quality_score, task_telemetry.quality_score),
+                   breakdown_json = COALESCE(excluded.breakdown_json, task_telemetry.breakdown_json),
+                   budget_json = COALESCE(excluded.budget_json, task_telemetry.budget_json),
+                   budget_alert = COALESCE(excluded.budget_alert, task_telemetry.budget_alert),
+                   error = COALESCE(excluded.error, task_telemetry.error)""",
+            (
+                turn_id,
+                task_id,
+                session_id,
+                model,
+                provider,
+                float(started_at if started_at is not None else now),
+                ended_at,
+                latency_ms,
+                float(api_latency_ms or 0.0),
+                int(api_call_count or 0),
+                int(input_tokens or 0),
+                int(output_tokens or 0),
+                int(cache_read_tokens or 0),
+                int(cache_write_tokens or 0),
+                int(reasoning_tokens or 0),
+                estimated,
+                actual,
+                cost_status,
+                cost_source,
+                outcome,
+                quality_score,
+                breakdown_json,
+                budget_json,
+                None,
+                error,
+            ),
+        )
+        row = conn.execute(
+            "SELECT estimated_cost_usd, input_tokens, output_tokens, "
+            "cache_read_tokens, cache_write_tokens, reasoning_tokens, budget_json "
+            "FROM task_telemetry WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        if row is not None:
+            alert = self._task_budget_alert(
+                budget_json=row["budget_json"],
+                input_tokens=int(row["input_tokens"] or 0),
+                output_tokens=int(row["output_tokens"] or 0),
+                cache_read_tokens=int(row["cache_read_tokens"] or 0),
+                cache_write_tokens=int(row["cache_write_tokens"] or 0),
+                reasoning_tokens=int(row["reasoning_tokens"] or 0),
+                estimated_cost_usd=float(row["estimated_cost_usd"] or 0.0),
+            )
+            conn.execute(
+                "UPDATE task_telemetry SET budget_alert = ? WHERE turn_id = ?",
+                (alert, turn_id),
+            )
+
+    def _record_task_telemetry_delta(
+        self,
+        conn,
+        *,
+        task_id: str,
+        turn_id: str,
+        session_id: Optional[str],
+        model: Optional[str],
+        provider: Optional[str],
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+        cache_write_tokens: int,
+        reasoning_tokens: int,
+        estimated_cost_usd: Optional[float],
+        actual_cost_usd: Optional[float],
+        cost_status: Optional[str],
+        cost_source: Optional[str],
+        api_call_count: int,
+        api_latency_ms: float,
+    ) -> None:
+        """Append one live API delta inside the token-accounting transaction."""
+        self._record_task_telemetry_row(
+            conn,
+            task_id=task_id,
+            turn_id=turn_id,
+            session_id=session_id,
+            model=model,
+            provider=provider,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            reasoning_tokens=reasoning_tokens,
+            estimated_cost_usd=estimated_cost_usd,
+            actual_cost_usd=actual_cost_usd,
+            cost_status=cost_status,
+            cost_source=cost_source,
+            api_call_count=api_call_count,
+            api_latency_ms=api_latency_ms,
+        )
+
+    def record_task_telemetry(
+        self,
+        *,
+        task_id: str,
+        turn_id: str,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        started_at: Optional[float] = None,
+        ended_at: Optional[float] = None,
+        latency_ms: Optional[float] = None,
+        outcome: Optional[str] = None,
+        quality_score: Optional[float] = None,
+        breakdown: Optional[Dict[str, Any]] = None,
+        budget: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Create or finalize a task-turn telemetry row.
+
+        Per-API-call usage is appended by ``update_token_counts`` so live cost
+        accounting shares the existing async writer and SQLite transaction.
+        This method owns the cheap turn-boundary metadata (context breakdown,
+        budget, outcome, and end-to-end latency).
+        """
+        if not task_id or not turn_id:
+            return
+
+        def _do(conn):
+            self._record_task_telemetry_row(
+                conn,
+                task_id=task_id,
+                turn_id=turn_id,
+                session_id=session_id,
+                model=model,
+                provider=provider,
+                started_at=started_at,
+                ended_at=ended_at,
+                latency_ms=latency_ms,
+                outcome=outcome,
+                quality_score=quality_score,
+                breakdown=breakdown,
+                budget=budget,
+                error=error,
+            )
+
+        self._execute_write(_do)
+
+    def get_task_telemetry(self, turn_id: str) -> Optional[Dict[str, Any]]:
+        """Read one task-turn row after draining live accounting deltas."""
+        self.flush_token_counts()
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM task_telemetry WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+        return self._decode_task_telemetry_row(row)
+
+    def list_task_telemetry(
+        self,
+        *,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List task-turn rows for dashboard/reporting consumers."""
+        self.flush_token_counts()
+        limit = max(1, min(int(limit), 10_000))
+        where = []
+        params: List[Any] = []
+        if task_id is not None:
+            where.append("task_id = ?")
+            params.append(task_id)
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        with self._read_ctx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM task_telemetry" + clause
+                + " ORDER BY started_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [self._decode_task_telemetry_row(row) for row in rows]
+
     def update_token_counts(
         self,
         session_id: str,
@@ -6734,6 +7051,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         billing_base_url: Optional[str] = None,
         billing_mode: Optional[str] = None,
         api_call_count: int = 0,
+        task_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        api_latency_ms: float = 0.0,
         absolute: bool = False,
     ) -> None:
         """Update token counters and backfill model if not already set.
@@ -6882,6 +7202,26 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     cost_status=cost_status,
                     cost_source=cost_source,
                     api_call_count=api_call_count,
+                )
+            if task_id and turn_id and not absolute:
+                self._record_task_telemetry_delta(
+                    conn,
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    model=model,
+                    provider=billing_provider,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_tokens=cache_write_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    estimated_cost_usd=estimated_cost_usd,
+                    actual_cost_usd=actual_cost_usd,
+                    cost_status=cost_status,
+                    cost_source=cost_source,
+                    api_call_count=api_call_count,
+                    api_latency_ms=api_latency_ms,
                 )
         self._execute_write(_do)
 

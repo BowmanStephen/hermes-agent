@@ -101,7 +101,9 @@ def _coerce_usage_int(value: Any) -> int:
     return 0
 
 
-def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
+def _record_codex_app_server_usage(
+    agent, turn, *, api_latency_ms: float = 0.0
+) -> dict[str, Any]:
     """Translate Codex app-server token usage into Hermes accounting.
 
     Codex app-server reports usage via thread/tokenUsage/updated as:
@@ -142,6 +144,9 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                     billing_base_url=agent.base_url,
                     billing_mode="subscription_included",
                     api_call_count=1,
+                    task_id=getattr(agent, "_current_task_id", None),
+                    turn_id=getattr(agent, "_current_turn_id", None),
+                    api_latency_ms=api_latency_ms,
                 )
             except Exception as exc:
                 logger.debug(
@@ -233,6 +238,9 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                 if cost_result.status == "included" else None,
                 model=agent.model,
                 api_call_count=1,
+                task_id=getattr(agent, "_current_task_id", None),
+                turn_id=getattr(agent, "_current_turn_id", None),
+                api_latency_ms=api_latency_ms,
             )
         except Exception as exc:
             logger.debug(
@@ -753,6 +761,7 @@ def run_codex_app_server_turn(
     # standard run_conversation() flow (line ~11823) before the early
     # return reaches us. Do NOT append again — that would duplicate.
 
+    _codex_turn_started = time.monotonic()
     try:
         turn = agent._codex_session.run_turn(user_input=user_message)
     except Exception as exc:
@@ -874,7 +883,11 @@ def run_codex_app_server_turn(
         getattr(agent, "_iters_since_skill", 0) + turn.tool_iterations
     )
     _record_codex_app_server_compaction(agent, turn)
-    usage_result = _record_codex_app_server_usage(agent, turn)
+    usage_result = _record_codex_app_server_usage(
+        agent,
+        turn,
+        api_latency_ms=(time.monotonic() - _codex_turn_started) * 1000.0,
+    )
     api_calls = 1
 
     # Now check the skill nudge AFTER iters were incremented — same

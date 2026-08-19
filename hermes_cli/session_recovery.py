@@ -35,6 +35,7 @@ _CANONICAL_TABLES = (
     "sessions",
     "messages",
     "session_model_usage",
+    "task_telemetry",
     "compression_locks",
     "gateway_routing",
     "async_delegations",
@@ -1118,6 +1119,7 @@ def _cleanup_partial_orphans(
         dependent_tables = (
             ("messages", "messages_removed"),
             ("session_model_usage", "session_model_usage_removed"),
+            ("task_telemetry", "task_telemetry_removed"),
             ("compression_locks", "compression_locks_removed"),
             (
                 "telegram_dm_topic_bindings",

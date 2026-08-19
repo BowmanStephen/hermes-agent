@@ -547,6 +547,18 @@ def build_turn_context(
         )
     agent._relay_pending_turn_id = None
     agent._current_turn_id = turn_id
+    agent._task_telemetry_started_at = time.time()
+    try:
+        from agent.task_telemetry import start_task_telemetry
+
+        start_task_telemetry(
+            agent,
+            task_id=effective_task_id,
+            turn_id=turn_id,
+            started_at=agent._task_telemetry_started_at,
+        )
+    except Exception:
+        logger.debug("task telemetry turn-start hook failed", exc_info=True)
     agent._current_api_request_id = ""
     # Tripwire: warn (with both turn ids) when this turn starts before the
     # previous turn's turn-end persist — concurrent turns on one session
@@ -1362,6 +1374,34 @@ def build_turn_context(
         # close path must no longer treat it as a pre-worker UI input.
         if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
             agent._pending_cli_user_message = None
+
+    # Persist the initial request composition once all injected context is
+    # known. Provider-reported usage remains authoritative for actual billing;
+    # this estimate explains where the turn's input pressure came from.
+    try:
+        from agent.task_telemetry import build_task_context_breakdown
+
+        breakdown = build_task_context_breakdown(
+            agent,
+            messages,
+            current_user_message=original_user_message,
+            current_user_index=current_turn_user_idx,
+            ext_prefetch_cache=ext_prefetch_cache,
+            plugin_user_context=plugin_user_context,
+        )
+        agent._task_telemetry_breakdown = breakdown
+        if agent._session_db is not None:
+            agent._session_db.record_task_telemetry(
+                task_id=effective_task_id,
+                turn_id=turn_id,
+                session_id=agent.session_id,
+                model=agent.model,
+                provider=agent.provider,
+                started_at=agent._task_telemetry_started_at,
+                breakdown=breakdown,
+            )
+    except Exception:
+        logger.debug("task telemetry context breakdown failed", exc_info=True)
 
     # Title the session from this user message, now — the row exists and the
     # turn has not called the model yet. Titling is derived from the user's

@@ -51,8 +51,11 @@ def test_worker_keeps_lifecycle_tools_despite_profile_disable(monkeypatch):
             quiet_mode=True,
         )
     )
+    # The full required worker lifecycle trio (task audit: kanban_complete,
+    # kanban_block, kanban_show) must survive a profile-level kanban disable.
     assert "kanban_complete" in names
     assert "kanban_block" in names
+    assert "kanban_show" in names
     assert "kanban_heartbeat" in names
 
 
@@ -67,6 +70,7 @@ def test_non_worker_still_loses_kanban_tools_when_disabled(monkeypatch):
     )
     assert "kanban_complete" not in names
     assert "kanban_block" not in names
+    assert "kanban_show" not in names
 
 
 def test_worker_disable_of_other_toolsets_still_applies(monkeypatch):

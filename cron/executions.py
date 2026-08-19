@@ -12,13 +12,16 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
-EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
-_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
+# Optional test/embedding override. Production resolves the path at transaction
+# time so dashboard operations that temporarily enter another profile cannot
+# leak that profile's execution records into the import-time home.
+EXECUTIONS_FILE: Optional[Path] = None
 MAX_TERMINAL_EXECUTIONS = 1000
 
 
@@ -30,9 +33,11 @@ def _current_executions_file():
     own ledger. Preserve the historical ``EXECUTIONS_FILE`` monkeypatch/embedding
     surface when a caller deliberately repoints the module constant.
     """
-    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+    if EXECUTIONS_FILE is not None:
         return EXECUTIONS_FILE
     return get_hermes_home().resolve() / "cron" / "executions.db"
+
+
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex

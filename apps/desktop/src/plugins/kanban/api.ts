@@ -57,14 +57,28 @@ const INTRO_KEY = 'introDismissed'
 const LANES_KEY = 'lanesByProfile'
 const COLLAPSED_KEY = 'collapsedLanes'
 
+/** Per-board high-water mark of seen event ids, persisted so a reconnect or
+ *  app restart resumes the /events tail from where it left off (`?since=`)
+ *  instead of replaying the board's whole history in 200-row frames — each of
+ *  which would trigger a full board+boards invalidation. */
+const eventCursors = new Map<string, number>()
+const cursorStorageKey = (slug: string) => `eventsCursor:${slug || '@current'}`
+
 /** One live `task_events` frame → precise cache invalidation: the board, plus
- *  each touched task's detail. The polls (8s board / 4s drawer) stay as the
+ *  each touched task's detail. The polls (60s board / 30s drawer) stay as the
  *  fallback — the socket just makes the board feel instant. */
-function onEventsFrame(slug: string, data: unknown): void {
+function onEventsFrame(slug: string, storage: PluginStorage | null, data: unknown): void {
   const events = (data as { events?: CompletionEvent[] })?.events
 
   if (!events?.length) {
     return
+  }
+
+  const maxId = events.reduce((max, ev) => (typeof ev.id === 'number' && ev.id > max ? ev.id : max), 0)
+
+  if (maxId > (eventCursors.get(slug) ?? 0)) {
+    eventCursors.set(slug, maxId)
+    storage?.set(cursorStorageKey(slug), maxId)
   }
 
   void queryClient.invalidateQueries({ queryKey: ['kanban', 'board'] })
@@ -117,7 +131,24 @@ export function bindApi(
 
   const open = (slug: string) => {
     close?.()
-    close = socket(slug ? `/events?board=${encodeURIComponent(slug)}` : '/events', data => onEventsFrame(slug, data))
+    const cursor = eventCursors.get(slug) ?? storage.get(cursorStorageKey(slug), 0)
+
+    if (cursor > 0) {
+      eventCursors.set(slug, cursor)
+    }
+
+    const params = new URLSearchParams()
+
+    if (slug) {
+      params.set('board', slug)
+    }
+
+    if (cursor > 0) {
+      params.set('since', String(cursor))
+    }
+
+    const qs = params.toString()
+    close = socket(qs ? `/events?${qs}` : '/events', data => onEventsFrame(slug, storage, data))
   }
 
   open($boardSlug.get())

@@ -145,6 +145,14 @@ type KanbanMessages = {
   addComment: string
   deliveredLive: string
   requeueWithNote: string
+  // drawer — worker controls + failure surfacing
+  retryTask: string
+  restartWorker: string
+  stopWorker: string
+  retryQueued: string
+  workerRestarted: string
+  workerStopped: string
+  lastFailureTitle: (n: number) => string
   notePosted: string
   activity: (n: number) => string
   runs: (n: number) => string
@@ -348,6 +356,13 @@ export const en: KanbanMessages = {
   addComment: 'Add a comment…',
   deliveredLive: 'Delivered to the running worker within a few seconds.',
   requeueWithNote: 'Requeue with note',
+  retryTask: 'Retry',
+  restartWorker: 'Restart worker',
+  stopWorker: 'Stop worker',
+  retryQueued: 'Requeued — a worker will pick it up shortly',
+  workerRestarted: 'Worker restarted from scratch',
+  workerStopped: 'Worker stopped — task parked in To-do',
+  lastFailureTitle: n => (n > 1 ? `Last failure · ${n} in a row` : 'Last failure'),
   notePosted: 'Note posted — worker requeued',
   activity: n => `Activity · ${n}`,
   runs: n => `Runs · ${n}`,
@@ -549,6 +564,13 @@ const ja: KanbanMessages = {
   addComment: 'コメントを追加…',
   deliveredLive: '数秒以内に実行中のワーカーへ届きます。',
   requeueWithNote: 'メモを付けて再キュー',
+  retryTask: '再試行',
+  restartWorker: 'ワーカーを再起動',
+  stopWorker: 'ワーカーを停止',
+  retryQueued: '再キューしました — まもなくワーカーが着手します',
+  workerRestarted: 'ワーカーを最初から再起動しました',
+  workerStopped: 'ワーカーを停止 — タスクは To-do に退避しました',
+  lastFailureTitle: n => (n > 1 ? `直近の失敗 · ${n} 回連続` : '直近の失敗'),
   notePosted: 'メモを投稿しました — ワーカーを再キューしました',
   activity: n => `アクティビティ・${n}`,
   runs: n => `実行・${n}`,
@@ -748,6 +770,13 @@ const zh: KanbanMessages = {
   addComment: '添加评论…',
   deliveredLive: '几秒内送达运行中的工作单元。',
   requeueWithNote: '附带备注重新入队',
+  retryTask: '重试',
+  restartWorker: '重启工作进程',
+  stopWorker: '停止工作进程',
+  retryQueued: '已重新入队 — 稍后将有工作进程接手',
+  workerRestarted: '工作进程已从头重启',
+  workerStopped: '工作进程已停止 — 任务移至待办',
+  lastFailureTitle: n => (n > 1 ? `最近失败 · 连续 ${n} 次` : '最近失败'),
   notePosted: '备注已发布 — 工作单元已重新入队',
   activity: n => `活动・${n}`,
   runs: n => `运行・${n}`,
@@ -946,6 +975,13 @@ const zhHant: KanbanMessages = {
   addComment: '新增留言…',
   deliveredLive: '幾秒內送達執行中的工作單元。',
   requeueWithNote: '附上備註重新排入佇列',
+  retryTask: '重試',
+  restartWorker: '重新啟動工作程序',
+  stopWorker: '停止工作程序',
+  retryQueued: '已重新排入佇列 — 稍後將有工作程序接手',
+  workerRestarted: '工作程序已從頭重新啟動',
+  workerStopped: '工作程序已停止 — 任務移至待辦',
+  lastFailureTitle: n => (n > 1 ? `最近失敗 · 連續 ${n} 次` : '最近失敗'),
   notePosted: '備註已發布 — 工作單元已重新排入佇列',
   activity: n => `活動・${n}`,
   runs: n => `執行・${n}`,

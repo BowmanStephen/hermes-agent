@@ -653,6 +653,40 @@ export function TaskDrawer({
     onSuccess: invalidate
   })
 
+  // Worker controls. Restart = reclaim (kill + requeue as ready, dispatcher
+  // respawns within its tick). Stop = reclaim, then park in To-do so the
+  // dispatcher does NOT respawn. Retry (blocked) = move to ready — the
+  // backend's unblock path resets the consecutive-failures counter.
+  const restartMut = useMutation({
+    mutationFn: () => reclaimTask(id!),
+    onError: err => host.notify({ kind: 'error', message: errText(err) }),
+    onSuccess: () => {
+      host.notify({ kind: 'info', message: k.workerRestarted })
+      invalidate()
+    }
+  })
+
+  const stopMut = useMutation({
+    mutationFn: async () => {
+      await reclaimTask(id!)
+      await patchTask(id!, { status: 'todo' })
+    },
+    onError: err => host.notify({ kind: 'error', message: errText(err) }),
+    onSuccess: () => {
+      host.notify({ kind: 'info', message: k.workerStopped })
+      invalidate()
+    }
+  })
+
+  const retryMut = useMutation({
+    mutationFn: () => patchTask(id!, { status: 'ready' }),
+    onError: err => host.notify({ kind: 'error', message: errText(err) }),
+    onSuccess: () => {
+      host.notify({ kind: 'info', message: k.retryQueued })
+      invalidate()
+    }
+  })
+
   if (!id) {
     return null
   }
@@ -688,6 +722,38 @@ export function TaskDrawer({
             </span>
           )}
           <div className="ml-auto flex items-center gap-0.5">
+            {task && running && (
+              <>
+                <Tip label={k.restartWorker}>
+                  <Button
+                    aria-label={k.restartWorker}
+                    disabled={restartMut.isPending || stopMut.isPending}
+                    onClick={() => restartMut.mutate()}
+                    size="icon-xs"
+                    variant="ghost"
+                  >
+                    <Codicon name="debug-restart" size="0.85rem" spinning={restartMut.isPending} />
+                  </Button>
+                </Tip>
+                <Tip label={k.stopWorker}>
+                  <Button
+                    aria-label={k.stopWorker}
+                    disabled={restartMut.isPending || stopMut.isPending}
+                    onClick={() => stopMut.mutate()}
+                    size="icon-xs"
+                    variant="ghost"
+                  >
+                    <Codicon name="debug-stop" size="0.85rem" spinning={stopMut.isPending} />
+                  </Button>
+                </Tip>
+              </>
+            )}
+            {task && task.status === 'blocked' && (
+              <Button disabled={retryMut.isPending} onClick={() => retryMut.mutate()} size="xs" variant="secondary">
+                <Codicon name="debug-restart" size="0.7rem" spinning={retryMut.isPending} />
+                {k.retryTask}
+              </Button>
+            )}
             {task && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -789,6 +855,26 @@ export function TaskDrawer({
             {task.status === 'ready' && !task.assignee && !defaultAssignee && (
               <Callout title={k.readyUnassignedTitle} tone={SEVERITY_TONE.warning}>
                 <p className="text-[0.71rem] leading-relaxed text-(--ui-text-secondary)">{k.readyUnassignedBody}</p>
+              </Callout>
+            )}
+
+            {task.last_failure_error && task.status !== 'done' && (
+              <Callout title={k.lastFailureTitle(task.consecutive_failures ?? 0)} tone={SEVERITY_TONE.error}>
+                <p className="whitespace-pre-wrap text-[0.71rem] leading-relaxed text-(--ui-text-secondary)">
+                  {task.last_failure_error}
+                </p>
+                {task.status === 'blocked' && (
+                  <Button
+                    className="self-start"
+                    disabled={retryMut.isPending}
+                    onClick={() => retryMut.mutate()}
+                    size="xs"
+                    variant="secondary"
+                  >
+                    <Codicon name="debug-restart" size="0.7rem" spinning={retryMut.isPending} />
+                    {k.retryTask}
+                  </Button>
+                )}
               </Callout>
             )}
 

@@ -99,7 +99,8 @@ import {
   shortId,
   useDefaultAssignee,
   useKanban,
-  useOrchestration
+  useOrchestration,
+  useProfileNames
 } from './ui'
 
 // ── optimistic board edits (reconciled by the follow-up refresh) ─────────────
@@ -151,10 +152,18 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
   const links = task.link_counts ? task.link_counts.parents + task.link_counts.children : 0
   const fallback = useDefaultAssignee()
   const orchestrator = useOrchestration()?.resolved_orchestrator_profile ?? ''
+  const profileNames = useProfileNames()
   // Ready + no assignee: with a configured default assignee the dispatcher
   // auto-assigns on its next tick (#27145) — say THAT, not "won't run". Only
   // a board with no fallback has the genuine silent failure.
   const unassignedReady = task.status === 'ready' && !task.assignee
+
+  // Ready + an assignee that isn't a real profile: the dispatcher silently
+  // skips these every tick (skipped_nonspawnable) — the card sits in Ready
+  // forever unless an external terminal claims it. Roster still loading
+  // (null) → no verdict, so the warning never flashes on fresh data.
+  const nonSpawnableReady =
+    task.status === 'ready' && !!task.assignee && profileNames !== null && !profileNames.has(task.assignee)
 
   // The agent on the hook for a queued card: the explicit assignee, else the
   // auto-default (ready), else the specifier that rewrites triage cards.
@@ -206,6 +215,14 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
           <span className="inline-flex shrink-0 cursor-help items-center gap-1 text-amber-500">
             <Codicon name="debug-disconnect" size="0.7rem" />
             {k.wontRun}
+          </span>
+        </Tip>
+      )}
+      {nonSpawnableReady && (
+        <Tip label={k.wontAutoRunTip(task.assignee!)}>
+          <span className="inline-flex shrink-0 cursor-help items-center gap-1 text-amber-500">
+            <Codicon name="debug-disconnect" size="0.7rem" />
+            {k.wontAutoRun}
           </span>
         </Tip>
       )}

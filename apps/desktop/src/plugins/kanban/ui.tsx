@@ -15,9 +15,9 @@ import {
   relativeTime,
   useQuery
 } from '@hermes/plugin-sdk'
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
-import { fetchOrchestration, ORCHESTRATION_KEY } from './api'
+import { fetchOrchestration, fetchProfiles, ORCHESTRATION_KEY, PROFILES_KEY } from './api'
 import { columnLabel, useKanban } from './i18n'
 import { columnMeta, type KanbanTask } from './types'
 
@@ -41,6 +41,15 @@ export function useOrchestration() {
  *  (`kanban.default_assignee`) — '' when unset, i.e. unassigned never runs. */
 export function useDefaultAssignee(): string {
   return useOrchestration()?.default_assignee.trim() ?? ''
+}
+
+/** Names of real Hermes profiles — the only assignees the dispatcher will
+ *  spawn workers for. Null while the roster is loading, so callers can avoid
+ *  flashing a false "not a profile" warning before the data exists. */
+export function useProfileNames(): null | Set<string> {
+  const { data } = useQuery({ queryKey: PROFILES_KEY, queryFn: fetchProfiles, staleTime: 60_000 })
+
+  return useMemo(() => (data ? new Set(data.profiles.map(profile => profile.name)) : null), [data])
 }
 
 // System-owned drop targets — you can drag a card OUT of these, never INTO

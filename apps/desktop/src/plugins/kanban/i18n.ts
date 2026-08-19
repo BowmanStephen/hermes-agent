@@ -155,6 +155,8 @@ type KanbanMessages = {
   lastFailureTitle: (n: number) => string
   deleteConfirmTitle: (n: number) => string
   deleteConfirmBody: string
+  wontAutoRun: string
+  wontAutoRunTip: (name: string) => string
   notePosted: string
   activity: (n: number) => string
   runs: (n: number) => string
@@ -367,6 +369,9 @@ export const en: KanbanMessages = {
   lastFailureTitle: n => (n > 1 ? `Last failure · ${n} in a row` : 'Last failure'),
   deleteConfirmTitle: n => (n > 1 ? `Delete ${n} tasks?` : 'Delete this task?'),
   deleteConfirmBody: 'Permanently removes the task with its comments, runs, and history. Archive keeps the record.',
+  wontAutoRun: "won't auto-run",
+  wontAutoRunTip: name =>
+    `"${name}" isn't a Hermes profile, so the dispatcher will never spawn a worker for this card — it waits for an external terminal to claim it. Reassign to a real profile if a bot should run it.`,
   notePosted: 'Note posted — worker requeued',
   activity: n => `Activity · ${n}`,
   runs: n => `Runs · ${n}`,
@@ -577,6 +582,9 @@ const ja: KanbanMessages = {
   lastFailureTitle: n => (n > 1 ? `直近の失敗 · ${n} 回連続` : '直近の失敗'),
   deleteConfirmTitle: n => (n > 1 ? `${n} 件のタスクを削除しますか？` : 'このタスクを削除しますか？'),
   deleteConfirmBody: 'タスクとそのコメント・実行履歴を完全に削除します。記録を残すにはアーカイブを使ってください。',
+  wontAutoRun: '自動実行されません',
+  wontAutoRunTip: name =>
+    `「${name}」は Hermes プロファイルではないため、ディスパッチャはこのカードのワーカーを起動しません。外部ターミナルによるクレイム待ちです。ボットに実行させる場合は実在するプロファイルに再割り当てしてください。`,
   notePosted: 'メモを投稿しました — ワーカーを再キューしました',
   activity: n => `アクティビティ・${n}`,
   runs: n => `実行・${n}`,
@@ -785,6 +793,9 @@ const zh: KanbanMessages = {
   lastFailureTitle: n => (n > 1 ? `最近失败 · 连续 ${n} 次` : '最近失败'),
   deleteConfirmTitle: n => (n > 1 ? `删除 ${n} 个任务？` : '删除此任务？'),
   deleteConfirmBody: '将永久删除任务及其评论、运行记录和历史。如需保留记录请使用归档。',
+  wontAutoRun: '不会自动运行',
+  wontAutoRunTip: name =>
+    `“${name}”不是 Hermes 配置档，调度器永远不会为这张卡片启动工作进程——它在等待外部终端认领。如需机器人执行，请改派给真实的配置档。`,
   notePosted: '备注已发布 — 工作单元已重新入队',
   activity: n => `活动・${n}`,
   runs: n => `运行・${n}`,
@@ -992,6 +1003,9 @@ const zhHant: KanbanMessages = {
   lastFailureTitle: n => (n > 1 ? `最近失敗 · 連續 ${n} 次` : '最近失敗'),
   deleteConfirmTitle: n => (n > 1 ? `刪除 ${n} 個任務？` : '刪除此任務？'),
   deleteConfirmBody: '將永久刪除任務及其留言、執行紀錄與歷史。如需保留紀錄請使用封存。',
+  wontAutoRun: '不會自動執行',
+  wontAutoRunTip: name =>
+    `「${name}」不是 Hermes 設定檔，調度器永遠不會為這張卡片啟動工作程序——它在等待外部終端認領。如需機器人執行，請改派給真實的設定檔。`,
   notePosted: '備註已發布 — 工作單元已重新排入佇列',
   activity: n => `活動・${n}`,
   runs: n => `執行・${n}`,

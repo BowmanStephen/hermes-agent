@@ -21,6 +21,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "clamp-test-token")
     from hermes_cli import web_server
 
+    # web_server resolves _SESSION_TOKEN from the environment once, at import
+    # time. Setting the env var only works if this fixture happens to be what
+    # first imports the module — true when this file runs alone, false in a
+    # full run where something imported it earlier, leaving the token a random
+    # one and every request below answering 401 instead of the 422 under test.
+    # Patch the resolved attribute so the fixture is independent of who
+    # imported first.
+    monkeypatch.setattr(web_server, "_SESSION_TOKEN", "clamp-test-token")
+
     with TestClient(web_server.app, raise_server_exceptions=False) as c:
         c.headers["Authorization"] = "Bearer clamp-test-token"
         yield c

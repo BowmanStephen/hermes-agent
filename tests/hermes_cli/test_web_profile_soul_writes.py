@@ -32,6 +32,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "soul-test-token")
     from hermes_cli import web_server
 
+    # _SESSION_TOKEN is resolved from the environment once, at import time, so
+    # the setenv above only takes effect when this fixture is what first
+    # imports web_server. Patch the resolved attribute too, or a full run
+    # (where something imported it earlier) answers 401 to every request here.
+    monkeypatch.setattr(web_server, "_SESSION_TOKEN", "soul-test-token")
+
     with TestClient(web_server.app, raise_server_exceptions=False) as c:
         c.headers["Authorization"] = "Bearer soul-test-token"
         yield c

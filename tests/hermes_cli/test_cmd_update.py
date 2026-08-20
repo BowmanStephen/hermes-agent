@@ -50,8 +50,20 @@ def mock_args():
 # ``shutil.which`` so the existing test setup keeps working without
 # per-test changes.
 @pytest.fixture(autouse=True)
-def _patch_managed_uv(request):
-    """Make managed_uv helpers follow shutil.which mocking in tests."""
+def _patch_managed_uv(monkeypatch):
+    """Make managed_uv helpers follow shutil.which mocking in tests.
+
+    Uses ``monkeypatch`` rather than ``with patch(...)`` deliberately. Tests in
+    this file re-patch these same attributes (e.g.
+    ``test_termux_reuses_existing_path_uv_without_pip`` overrides
+    ``resolve_uv``), and two independent undo mechanisms unwind in the wrong
+    order: the ``patch`` context exits first and restores the real function,
+    then monkeypatch "restores" what it had recorded — the mock — leaving it
+    installed for the rest of the session. ``hermes_cli.managed_uv.resolve_uv``
+    then answered every later test with ``shutil.which("uv")``, which is what
+    made test_managed_uv see the system uv instead of its tmp_path one.
+    Sharing one monkeypatch stack keeps the undo strictly LIFO.
+    """
     import shutil
 
     # resolve_uv delegates to shutil.which("uv") so that test patches
@@ -65,10 +77,12 @@ def _patch_managed_uv(request):
     def _fake_update_managed_uv(**_kwargs):
         return None  # never actually self-update in tests
 
-    with patch("hermes_cli.managed_uv.resolve_uv", side_effect=_fake_resolve_uv), \
-         patch("hermes_cli.managed_uv.ensure_uv", side_effect=_fake_ensure_uv), \
-         patch("hermes_cli.managed_uv.update_managed_uv", side_effect=_fake_update_managed_uv):
-        yield
+    monkeypatch.setattr("hermes_cli.managed_uv.resolve_uv", _fake_resolve_uv)
+    monkeypatch.setattr("hermes_cli.managed_uv.ensure_uv", _fake_ensure_uv)
+    monkeypatch.setattr(
+        "hermes_cli.managed_uv.update_managed_uv", _fake_update_managed_uv
+    )
+    yield
 
 
 @pytest.fixture(autouse=True)

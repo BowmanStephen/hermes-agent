@@ -211,9 +211,7 @@ function Diagnostics({
       {items.map(diag => {
         const tone = SEVERITY_TONE[diag.severity]
 
-        const actions = diag.actions.filter(action =>
-          ['cli_hint', 'comment', 'reclaim'].includes(action.kind)
-        )
+        const actions = diag.actions.filter(action => ['cli_hint', 'comment', 'reclaim'].includes(action.kind))
 
         return (
           <Callout

@@ -168,6 +168,7 @@ describe('scanDiskPlugins (#66899)', () => {
     })
 
     const register = vi.fn()
+
     ;(globalThis as unknown as { __raceRegister: unknown }).__raceRegister = register
     const valid = 'export default { id: "race", register: globalThis.__raceRegister }'
     const partial = '<<<<<<< HEAD\nexport default { id: "race", register: globalThis.__raceRegister }'
@@ -197,6 +198,7 @@ describe('scanDiskPlugins (#66899)', () => {
         blob =>
           `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
       )
+
     const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
     const RealBlob = globalThis.Blob
     vi.stubGlobal(
@@ -233,12 +235,14 @@ describe('scanDiskPlugins (#66899)', () => {
     readFileText.mockResolvedValue({ text: partial })
     watchPreviewFile.mockResolvedValue({ id: 'w-broken' })
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
     const createObjectURL = vi
       .spyOn(URL, 'createObjectURL')
       .mockImplementation(
         blob =>
           `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
       )
+
     const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
     const RealBlob = globalThis.Blob
     vi.stubGlobal(

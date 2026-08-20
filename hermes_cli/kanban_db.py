@@ -8902,7 +8902,41 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     return streak
 
 
-def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
+def _worker_crash_reason(task_id: str, board: Optional[str] = None) -> Optional[str]:
+    """Best-effort one-line cause from the tail of a crashed worker's log.
+
+    ``pid 74514 exited with code 1`` tells an operator nothing, while the
+    reason is usually sitting in the worker's own log ("Error: Unknown
+    skill(s): humanizer"). Prefer the last explicit error line; fall back
+    to the last non-empty line. Never raises — a missing/unreadable log
+    just means no extra detail.
+    """
+    try:
+        path = worker_log_path(task_id, board=board)
+        with open(path, "rb") as fh:
+            try:
+                fh.seek(-8192, os.SEEK_END)
+            except OSError:
+                fh.seek(0)
+            tail = fh.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    for line in reversed(lines):
+        low = line.lower()
+        if low.startswith(("error:", "error ", "fatal:", "traceback")) or (
+            "error:" in low and len(line) < 300
+        ):
+            return line[:300]
+    return lines[-1][:300]
+
+
+def detect_crashed_workers(
+    conn: sqlite3.Connection, *, board: Optional[str] = None,
+) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
     Appends a ``crashed`` event and restores the task's source phase.
@@ -9026,6 +9060,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     error_text = f"pid {pid} not alive"
                 event_kind = "crashed"
                 event_payload = {"pid": pid, "claimer": row["claim_lock"]}
+                # The exit code alone is undiagnosable; the worker's own log
+                # usually names the cause (bad skill, missing profile, auth).
+                # Carry it into last_failure_error so the board can say why.
+                crash_reason = _worker_crash_reason(row["id"], board)
+                if crash_reason:
+                    error_text = f"{error_text}: {crash_reason}"
+                    event_payload["reason"] = crash_reason
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
@@ -10008,7 +10049,7 @@ def _dispatch_once_locked(
     result.stale = detect_stale_running(
         conn, stale_timeout_seconds=stale_timeout_seconds,
     )
-    result.crashed = detect_crashed_workers(conn)
+    result.crashed = detect_crashed_workers(conn, board=board)
     # detect_crashed_workers stashes protocol-violation auto-blocks on
     # itself so the public list-return stays stable. Pull them into the
     # DispatchResult here so telemetry / tests see the trip.

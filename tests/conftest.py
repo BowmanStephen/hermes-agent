@@ -892,11 +892,34 @@ def _dashboard_app_state_isolation():
         yield
         return
 
+    # The route table is shared too. ``_mount_plugin_api_routes()`` appends to
+    # it, and the RCE-bypass tests call that with
+    # ``importlib.util.spec_from_file_location`` mocked — so a MagicMock
+    # "router" gets mounted on the real app and stays there. Later requests
+    # then hit a mock endpoint and die serializing it
+    # ("AsyncMock.keys() returned a non-iterable"). Restoring the list
+    # contents (not rebinding it) keeps any references the app holds valid.
+    router = getattr(app, "router", None)
+    routes = getattr(router, "routes", None)
+    routes_before = list(routes) if isinstance(routes, list) else None
+    # ``include_router`` also MERGES the child's lifespan into the parent's
+    # ``lifespan_context``. A mounted mock therefore poisons app startup for
+    # every later TestClient — the failure surfaces inside FastAPI's
+    # merged_lifespan, not at the route.
+    lifespan_before = getattr(router, "lifespan_context", None)
+
     _MISSING = object()
     before = {key: store.get(key, _MISSING) for key in _SHARED_APP_STATE_KEYS}
     try:
         yield
     finally:
+        if routes_before is not None and routes != routes_before:
+            routes[:] = routes_before
+        if (
+            lifespan_before is not None
+            and getattr(router, "lifespan_context", None) is not lifespan_before
+        ):
+            router.lifespan_context = lifespan_before
         for key, value in before.items():
             if value is _MISSING:
                 # Neutralise rather than delete. Every reader uses

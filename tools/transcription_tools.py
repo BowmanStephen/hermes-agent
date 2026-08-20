@@ -1751,11 +1751,25 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
 
     from faster_whisper import WhisperModel
     if force_cpu:
+        # Keep the safety override on the device, but honor an explicit CPU
+        # compute_type from stt.local. The default remains int8; otherwise the
+        # documented configuration knob is silently ignored on Apple Silicon.
+        requested_compute_type = str(compute_type or "auto").strip()
+        effective_compute_type = (
+            "int8"
+            if requested_compute_type.lower() == "auto"
+            else requested_compute_type
+        )
         logger.info(
             "Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
-            "(int8) to avoid native device autodetection crashes"
+            "(%s) to avoid native device autodetection crashes",
+            effective_compute_type,
         )
-        return WhisperModel(model_name, device="cpu", compute_type="int8")
+        return WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type=effective_compute_type,
+        )
 
     try:
         return WhisperModel(model_name, device=device, compute_type=compute_type)

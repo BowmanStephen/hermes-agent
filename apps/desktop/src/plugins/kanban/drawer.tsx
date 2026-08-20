@@ -181,13 +181,25 @@ function MetaRow({ children, label }: { children: ReactNode; label: string }) {
 
 /** The dashboard's diagnostics panel: severity-toned, plain-English, with the
  *  backend's structured recovery actions as buttons. `reassign` is skipped —
- *  the Assignee control in the meta table IS that action, inline. */
-function Diagnostics({ items, onReclaim }: { items: Diagnostic[]; onReclaim: () => void }) {
+ *  the Assignee control in the meta table IS that action, inline. `comment`
+ *  jumps to the composer: the backend marks it `suggested` on a task that's
+ *  been blocked for hours, and that handoff is exactly "answer it here". */
+function Diagnostics({
+  items,
+  onComment,
+  onReclaim
+}: {
+  items: Diagnostic[]
+  onComment: () => void
+  onReclaim: () => void
+}) {
   const k = useKanban()
 
   const act = (action: DiagnosticAction) => {
     if (action.kind === 'reclaim') {
       onReclaim()
+    } else if (action.kind === 'comment') {
+      onComment()
     } else if (action.kind === 'cli_hint') {
       void navigator.clipboard.writeText(String(action.payload?.command ?? action.label))
       host.notify({ kind: 'info', message: k.commandCopied })
@@ -198,7 +210,10 @@ function Diagnostics({ items, onReclaim }: { items: Diagnostic[]; onReclaim: () 
     <div className="flex flex-col gap-2">
       {items.map(diag => {
         const tone = SEVERITY_TONE[diag.severity]
-        const actions = diag.actions.filter(action => action.kind === 'reclaim' || action.kind === 'cli_hint')
+
+        const actions = diag.actions.filter(action =>
+          ['cli_hint', 'comment', 'reclaim'].includes(action.kind)
+        )
 
         return (
           <Callout
@@ -285,11 +300,13 @@ function AssigneeMenu({
 // heavier option: post the note AND reclaim so the task restarts from scratch
 // with the note in context (use when the current run has gone off the rails).
 function CommentComposer({
+  inputRef,
   onRequeue,
   onSubmit,
   pending,
   running
 }: {
+  inputRef?: React.Ref<HTMLTextAreaElement>
   onRequeue?: (body: string) => void
   onSubmit: (body: string) => void
   pending: boolean
@@ -329,6 +346,7 @@ function CommentComposer({
             }
           }}
           placeholder={running ? k.messageWorker : k.addComment}
+          ref={inputRef}
           rows={1}
           size="sm"
           value={body}
@@ -553,6 +571,14 @@ export function TaskDrawer({
   const qc = useQueryClient()
   const slug = useValue($boardSlug)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+
+  // A diagnostic's `comment` action means "answer this here" — bring the
+  // composer into view and put the caret in it.
+  const focusComposer = () => {
+    composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    composerRef.current?.focus({ preventScroll: true })
+  }
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
@@ -566,7 +592,7 @@ export function TaskDrawer({
   const running = task?.status === 'running'
   const defaultAssignee = useDefaultAssignee()
 
-  const { data: log } = useQuery({
+  const { data: log, error: logError } = useQuery({
     enabled: !!id,
     queryFn: () => fetchLog(id!),
     queryKey: logKey(slug, id ?? ''),
@@ -882,7 +908,11 @@ export function TaskDrawer({
 
             {task.diagnostics && task.diagnostics.length > 0 && (
               <Section label={k.diagnosticsN(task.diagnostics.length)}>
-                <Diagnostics items={task.diagnostics} onReclaim={() => void mutate(() => reclaimTask(task.id))()} />
+                <Diagnostics
+                  items={task.diagnostics}
+                  onComment={focusComposer}
+                  onReclaim={() => void mutate(() => reclaimTask(task.id))()}
+                />
               </Section>
             )}
 
@@ -950,6 +980,7 @@ export function TaskDrawer({
                 </ul>
               )}
               <CommentComposer
+                inputRef={composerRef}
                 onRequeue={body => requeueMut.mutate(body)}
                 onSubmit={body => commentMut.mutate(body)}
                 pending={commentMut.isPending || requeueMut.isPending}
@@ -1025,12 +1056,22 @@ export function TaskDrawer({
               </Section>
             )}
 
-            {log?.exists && log.content && (
-              <Section label={log.truncated ? k.workerLogTail : k.workerLog}>
-                <ScrollFade deps={log.content.length} max="12rem">
-                  <LogView className="border-0 px-0">{log.content}</LogView>
-                </ScrollFade>
+            {logError ? (
+              // A failing log fetch used to look identical to "no log yet",
+              // which reads as "the worker printed nothing" — the opposite of
+              // the truth when the backend is unreachable.
+              <Section label={k.workerLog}>
+                <p className="text-[0.71rem] leading-relaxed text-destructive">{k.workerLogError(errText(logError))}</p>
               </Section>
+            ) : (
+              log?.exists &&
+              log.content && (
+                <Section label={log.truncated ? k.workerLogTail : k.workerLog}>
+                  <ScrollFade deps={log.content.length} max="12rem">
+                    <LogView className="border-0 px-0">{log.content}</LogView>
+                  </ScrollFade>
+                </Section>
+              )
             )}
 
             <AttachmentsSection

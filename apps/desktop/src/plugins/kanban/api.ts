@@ -87,6 +87,9 @@ function onEventsFrame(slug: string, storage: PluginStorage | null, data: unknow
 
   for (const taskId of new Set(events.map(event => event.task_id).filter(Boolean))) {
     void queryClient.invalidateQueries({ queryKey: taskKey(slug, taskId!) })
+    // The worker log rode the 3s poll alone; a spawn/completion event means
+    // there's new output to show right now.
+    void queryClient.invalidateQueries({ queryKey: logKey(slug, taskId!) })
   }
 
   // Completion notification (after invalidation so notify failure

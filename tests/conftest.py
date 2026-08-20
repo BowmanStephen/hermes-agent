@@ -859,11 +859,6 @@ def _real_repo_git_guard(request, monkeypatch):
 
     import subprocess as _sp
 
-    _orig_run = _sp.run
-    _orig_popen = _sp.Popen
-    _orig_check_output = _sp.check_output
-    _orig_check_call = _sp.check_call
-
     def _wrap(orig):
         def _guarded(cmd, *args, **kwargs):
             _guard_git_argv(cmd, kwargs.get("cwd"))
@@ -871,10 +866,21 @@ def _real_repo_git_guard(request, monkeypatch):
 
         return _guarded
 
-    monkeypatch.setattr(_sp, "run", _wrap(_orig_run))
-    monkeypatch.setattr(_sp, "Popen", _wrap(_orig_popen))
-    monkeypatch.setattr(_sp, "check_output", _wrap(_orig_check_output))
-    monkeypatch.setattr(_sp, "check_call", _wrap(_orig_check_call))
+    # ``Popen`` must stay a CLASS. Modules annotate fields as
+    # ``subprocess.Popen | None`` and those unions are evaluated at import
+    # time, so swapping in a plain function raises
+    # "unsupported operand type(s) for |: 'function' and 'NoneType'" the
+    # moment such a module is first imported inside a test. Subclassing keeps
+    # the union, isinstance checks, and context-manager protocol intact.
+    class _GuardedPopen(_sp.Popen):
+        def __init__(self, cmd, *args, **kwargs):
+            _guard_git_argv(cmd, kwargs.get("cwd"))
+            super().__init__(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(_sp, "run", _wrap(_sp.run))
+    monkeypatch.setattr(_sp, "Popen", _GuardedPopen)
+    monkeypatch.setattr(_sp, "check_output", _wrap(_sp.check_output))
+    monkeypatch.setattr(_sp, "check_call", _wrap(_sp.check_call))
 
 
 # ── Live state.db write guard ───────────────────────────────────────────────

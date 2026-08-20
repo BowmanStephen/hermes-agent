@@ -1,4 +1,4 @@
-"""Shared fixtures for tests/acp.
+"""Shared fixtures for tests/acp_suite.
 
 Keeps the ACP server tests offline: ``HermesACPAgent._build_model_state``
 calls ``hermes_cli.inventory.build_models_payload``, which (without this

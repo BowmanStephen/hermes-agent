@@ -2783,19 +2783,23 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         ).stdout.strip()
         == "true"
     )
+    # ``--is-shallow-repository`` answers "true" for a repo that merely CARRIES
+    # a boundary in .git/shallow — one stale entry from an old fetch is enough,
+    # even when the full history is present. Depth-fetching such a repo does
+    # not preserve a boundary, it TRUNCATES it: a 23,000-commit working clone
+    # collapses to a single commit, which is what happened to this checkout
+    # three times on 2026-08-19. Only trust the flag when the history really is
+    # a stub.
+    from hermes_cli.banner import _local_history_is_deep, _running_under_pytest
+
+    if is_shallow and _local_history_is_deep(_m().PROJECT_ROOT):
+        is_shallow = False
+
     depth_args = ["--depth", "1"] if is_shallow else []
 
-    # A depth-limited fetch does not merely "preserve the boundary" on a repo
-    # that only REPORTS shallow (one stale ``.git/shallow`` entry is enough,
-    # even with full history present) — it truncates that checkout to a single
-    # commit. Under pytest the fetches below run against the developer's real
-    # PROJECT_ROOT, which is how a full test run collapsed a 23,926-commit
-    # working clone on 2026-08-19. Drop the depth flag there: a test that
-    # reaches a real fetch at all is already escaping its mocks, and the
-    # blast radius must not be the developer's history.
-    # See ``banner._running_under_pytest`` for why this is env-based.
-    from hermes_cli.banner import _running_under_pytest
-
+    # Belt and braces: under pytest these fetches run against the developer's
+    # real PROJECT_ROOT, and a test that reaches a real fetch at all is already
+    # escaping its mocks. The blast radius must not be their history.
     if _running_under_pytest():
         depth_args = []
 

@@ -186,6 +186,27 @@ def _running_under_pytest() -> bool:
     )
 
 
+#: A genuine installer checkout (``git clone --depth 1``) has a one-commit
+#: history. Anything meaningfully deeper is a real clone that happens to carry
+#: a stale shallow boundary, and must never be depth-fetched.
+_SHALLOW_STUB_MAX_COMMITS = 2
+
+
+def _local_history_is_deep(repo_dir: Path) -> bool:
+    """True when HEAD has real history behind it, despite a shallow marker.
+
+    Returns False when the depth can't be determined, so an unreadable repo
+    keeps the historical behaviour rather than silently changing fetch shape.
+    """
+    counted = _git_stdout(
+        ["rev-list", "--count", f"HEAD~{_SHALLOW_STUB_MAX_COMMITS}..HEAD"],
+        cwd=repo_dir,
+    )
+    # `HEAD~N` fails on a genuine stub (no such ancestor) — that is the signal
+    # for "really shallow", not an error worth reporting.
+    return bool(counted) and counted.isdigit()
+
+
 def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5) -> Optional[str]:
     try:
         result = subprocess.run(
@@ -331,6 +352,16 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     # count path unchanged. Mirrors the desktop fix in apps/desktop/electron/main.cjs.
     shallow = _git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir)
     is_shallow = shallow == "true"
+
+    # ``--is-shallow-repository`` answers "true" for a repo that merely CARRIES
+    # a boundary in .git/shallow — one stale entry left by an old fetch is
+    # enough, even when the full history is present. Depth-fetching such a repo
+    # does not preserve a boundary, it TRUNCATES it: a 23,000-commit working
+    # clone collapses to a single commit. Only treat the repo as shallow when
+    # its history really is a stub, so the depth flag can never destroy
+    # history it was meant to protect.
+    if is_shallow and _local_history_is_deep(repo_dir):
+        is_shallow = False
 
     # Never fetch while running under pytest. The passive update check is
     # best-effort and no test asserts on the refs it moves, but the fetch is a

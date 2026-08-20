@@ -852,6 +852,49 @@ def _guard_git_argv(cmd, cwd):
     )
 
 
+# ── Shared dashboard-app state isolation ───────────────────────────────────
+# ``hermes_cli.web_server.app`` is a module-level FastAPI singleton, so
+# ``app.state`` is shared by every test that touches the dashboard. The auth
+# gate reads ``app.state.auth_required``: leave it True and every later test
+# gets 401 from the middleware instead of reaching its route.
+#
+# ``test_dashboard_auth_gate`` did exactly that — it calls ``start_server``
+# for a public bind, which sets the flag, and never puts it back. All nine
+# ``test_dashboard_param_clamps`` tests then read 401 where they assert 422,
+# and they pass alone. Snapshot and restore the flags rather than asking each
+# dashboard test to remember; ``sys.modules`` is probed rather than imported
+# so this never drags web_server into unrelated test processes.
+
+_SHARED_APP_STATE_KEYS = ("auth_required", "bound_host")
+
+
+@pytest.fixture(autouse=True)
+def _dashboard_app_state_isolation():
+    _ws = sys.modules.get("hermes_cli.web_server")
+    app = getattr(_ws, "app", None) if _ws is not None else None
+    state = getattr(app, "state", None)
+
+    if state is None:
+        yield
+        return
+
+    _MISSING = object()
+    before = {key: getattr(state, key, _MISSING) for key in _SHARED_APP_STATE_KEYS}
+    try:
+        yield
+    finally:
+        for key, value in before.items():
+            if value is _MISSING:
+                # Only clear what the test itself introduced.
+                if hasattr(state, key):
+                    try:
+                        delattr(state, key)
+                    except (AttributeError, KeyError):
+                        pass
+            else:
+                setattr(state, key, value)
+
+
 @pytest.fixture(autouse=True)
 def _real_repo_git_guard(request, monkeypatch):
     if request.node.get_closest_marker("live_system_guard_bypass") is not None:

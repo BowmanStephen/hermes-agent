@@ -2,7 +2,35 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
+
+# Modules that cache HERMES_HOME-derived paths at import time. A fixture that
+# repoints HERMES_HOME must evict these so the fresh root is picked up.
+_HOME_CACHING_PREFIXES = ("hermes_cli", "hermes_state")
+_HOME_CACHING_MODULES = ("hermes_constants",)
+
+
+def evict_home_caching_modules(monkeypatch) -> None:
+    """Drop HERMES_HOME-caching modules from ``sys.modules``, restorably.
+
+    Fixtures that repoint ``HERMES_HOME`` have to evict these so the next
+    import re-resolves against the new root. Doing that with a bare
+    ``del sys.modules[...]`` leaks: every module object imported at
+    collection time by OTHER test files stays bound in those files, while
+    ``sys.modules`` now holds nothing (or, after the next import, a
+    DIFFERENT object). Autouse fixtures that probe ``sys.modules`` — notably
+    the ``_kanban_write_guard`` in the root conftest — then silently no-op,
+    and patches land on an object the test under inspection never sees.
+    That was worth 16 failures in ``-k kanban`` that all passed in isolation.
+
+    ``monkeypatch.delitem`` records each eviction and pytest restores the
+    original module objects at teardown, so the leak can't outlive the test.
+    """
+    for name in list(sys.modules):
+        if name.startswith(_HOME_CACHING_PREFIXES) or name in _HOME_CACHING_MODULES:
+            monkeypatch.delitem(sys.modules, name, raising=False)
 
 
 @pytest.fixture

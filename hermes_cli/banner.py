@@ -172,6 +172,20 @@ def _is_official_ssh_remote(url: str | None) -> bool:
     return _is_ssh_remote(url) and _canonical_github_remote(url) == _OFFICIAL_REPO_CANONICAL
 
 
+def _running_under_pytest() -> bool:
+    """True when this process (or a parent test process) is a pytest run.
+
+    Deliberately env-based and not a fixture: pytest exports these into the
+    environment, so a subprocess a test spawns inherits them and is covered
+    too. Mirrors ``hermes_state._running_under_pytest``.
+    """
+    return bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("PYTEST_VERSION")
+        or os.environ.get("HERMES_TEST_ISOLATION")
+    )
+
+
 def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5) -> Optional[str]:
     try:
         result = subprocess.run(
@@ -318,35 +332,45 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     shallow = _git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir)
     is_shallow = shallow == "true"
 
-    try:
-        # Self-heal abandoned git lock files before fetching. A stale
-        # .git/shallow.lock from a crashed fetch makes the fetch fail, the
-        # exception below is swallowed, and stale refs get compared against
-        # HEAD — silently degrading the passive check until a human removes
-        # the lock (git never self-heals these).
-        from hermes_cli.gitlock import clear_stale_git_locks
+    # Never fetch while running under pytest. The passive update check is
+    # best-effort and no test asserts on the refs it moves, but the fetch is a
+    # real network write against a real checkout — and on a repository that
+    # merely REPORTS shallow (one stale ``.git/shallow`` entry is enough, even
+    # with full history present) the ``--depth 1`` below truncates that
+    # checkout to a single commit. That is how a full test run collapsed a
+    # 23,926-commit working clone on 2026-08-19. The check is env-based, like
+    # ``hermes_state._running_under_pytest``, so subprocess children of a test
+    # are covered too — in-process mocks and fixtures cannot reach those.
+    if not _running_under_pytest():
+        try:
+            # Self-heal abandoned git lock files before fetching. A stale
+            # .git/shallow.lock from a crashed fetch makes the fetch fail, the
+            # exception below is swallowed, and stale refs get compared against
+            # HEAD — silently degrading the passive check until a human removes
+            # the lock (git never self-heals these).
+            from hermes_cli.gitlock import clear_stale_git_locks
 
-        clear_stale_git_locks(repo_dir)
+            clear_stale_git_locks(repo_dir)
 
-        # Scope the fetch to the one branch the behind-count compares against.
-        # An unscoped ``git fetch origin`` transfers every remote head (~1,400
-        # on this repo — measured 3.0 s vs 0.55 s scoped) and can burn the full
-        # 10 s timeout on slow links. ``cmd_update`` already scopes its fetch
-        # for the same reason. Modern git updates the ``origin/main`` tracking
-        # ref on a scoped fetch, so the ``HEAD..origin/main`` count below is
-        # unaffected; the shallow path compares against FETCH_HEAD, which a
-        # scoped fetch also updates.
-        fetch_args = ["git", "fetch", "origin", "main"]
-        if is_shallow:
-            fetch_args += ["--depth", "1"]
-        fetch_args.append("--quiet")
-        subprocess.run(
-            fetch_args,
-            capture_output=True, timeout=10,
-            cwd=str(repo_dir),
-        )
-    except Exception:
-        pass  # Offline or timeout — use stale refs, that's fine
+            # Scope the fetch to the one branch the behind-count compares
+            # against. An unscoped ``git fetch origin`` transfers every remote
+            # head (~1,400 on this repo — measured 3.0 s vs 0.55 s scoped) and
+            # can burn the full 10 s timeout on slow links. ``cmd_update``
+            # already scopes its fetch for the same reason. Modern git updates
+            # the ``origin/main`` tracking ref on a scoped fetch, so the
+            # ``HEAD..origin/main`` count below is unaffected; the shallow path
+            # compares against FETCH_HEAD, which a scoped fetch also updates.
+            fetch_args = ["git", "fetch", "origin", "main"]
+            if is_shallow:
+                fetch_args += ["--depth", "1"]
+            fetch_args.append("--quiet")
+            subprocess.run(
+                fetch_args,
+                capture_output=True, timeout=10,
+                cwd=str(repo_dir),
+            )
+        except Exception:
+            pass  # Offline or timeout — use stale refs, that's fine
 
     if is_shallow:
         # No history to count across the shallow boundary. `origin/main` may not

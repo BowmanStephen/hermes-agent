@@ -2785,6 +2785,20 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     )
     depth_args = ["--depth", "1"] if is_shallow else []
 
+    # A depth-limited fetch does not merely "preserve the boundary" on a repo
+    # that only REPORTS shallow (one stale ``.git/shallow`` entry is enough,
+    # even with full history present) — it truncates that checkout to a single
+    # commit. Under pytest the fetches below run against the developer's real
+    # PROJECT_ROOT, which is how a full test run collapsed a 23,926-commit
+    # working clone on 2026-08-19. Drop the depth flag there: a test that
+    # reaches a real fetch at all is already escaping its mocks, and the
+    # blast radius must not be the developer's history.
+    # See ``banner._running_under_pytest`` for why this is env-based.
+    from hermes_cli.banner import _running_under_pytest
+
+    if _running_under_pytest():
+        depth_args = []
+
     if branch == "main":
         # Probe locally (~6 ms) whether an 'upstream' remote exists at all
         # before spending a network fetch on it. Non-fork installs have no

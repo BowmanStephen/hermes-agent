@@ -865,7 +865,11 @@ def _guard_git_argv(cmd, cwd):
 # dashboard test to remember; ``sys.modules`` is probed rather than imported
 # so this never drags web_server into unrelated test processes.
 
-_SHARED_APP_STATE_KEYS = ("auth_required", "bound_host")
+#: Only ``auth_required`` — that is the flag whose leak turns later tests into
+#: 401s. ``bound_host`` is left alone on purpose: tests manage it with
+#: ``monkeypatch.setattr(..., raising=False)``, whose undo deletes the key, and
+#: a second restorer racing that delete just turns teardown into a KeyError.
+_SHARED_APP_STATE_KEYS = ("auth_required",)
 
 
 @pytest.fixture(autouse=True)
@@ -878,21 +882,32 @@ def _dashboard_app_state_isolation():
         yield
         return
 
+    # Starlette's State keeps everything in a plain dict and its __delattr__
+    # raises KeyError for a missing key. Tests also delete these attributes in
+    # their own cleanup, so an attribute-level restore races with them and can
+    # error a test during teardown. Work on the dict directly, where set and
+    # delete are total operations.
+    store = getattr(state, "_state", None)
+    if not isinstance(store, dict):
+        yield
+        return
+
     _MISSING = object()
-    before = {key: getattr(state, key, _MISSING) for key in _SHARED_APP_STATE_KEYS}
+    before = {key: store.get(key, _MISSING) for key in _SHARED_APP_STATE_KEYS}
     try:
         yield
     finally:
         for key, value in before.items():
             if value is _MISSING:
-                # Only clear what the test itself introduced.
-                if hasattr(state, key):
-                    try:
-                        delattr(state, key)
-                    except (AttributeError, KeyError):
-                        pass
+                # Neutralise rather than delete. Every reader uses
+                # ``getattr(app.state, "auth_required", False)``, so False is
+                # indistinguishable from absent — and leaving the key in place
+                # keeps a later ``monkeypatch`` undo (which deletes it) working
+                # instead of raising KeyError during teardown.
+                if key in store:
+                    store[key] = False
             else:
-                setattr(state, key, value)
+                store[key] = value
 
 
 @pytest.fixture(autouse=True)

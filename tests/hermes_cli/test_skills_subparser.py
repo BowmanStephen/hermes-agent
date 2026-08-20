@@ -3,7 +3,7 @@
 import argparse
 
 
-def test_no_duplicate_skills_subparser():
+def test_no_duplicate_skills_subparser(monkeypatch):
     """Ensure 'skills' subparser is only registered once to avoid Python 3.11+ crash.
 
     Python 3.11 changed argparse to raise an exception on duplicate subparser
@@ -19,9 +19,12 @@ def test_no_duplicate_skills_subparser():
     # argparse.ArgumentError at module load time
     import sys
 
-    # Remove cached module if present
-    if 'hermes_cli.main' in sys.modules:
-        del sys.modules['hermes_cli.main']
+    # Drop the cached module so the import below really re-executes.
+    # monkeypatch.delitem restores it at teardown: a bare `del` leaves every
+    # later test in the session holding a stale `hermes_cli.main` reference
+    # while a fresh object sits in sys.modules, so their patches land on an
+    # object the code under test never sees.
+    monkeypatch.delitem(sys.modules, 'hermes_cli.main', raising=False)
 
     try:
         import hermes_cli.main  # noqa: F401

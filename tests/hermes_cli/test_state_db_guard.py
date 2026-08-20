@@ -104,9 +104,12 @@ class TestPreUpdateBackupIntegrityGuard:
         conn.close()
         monkeypatch.setenv("HERMES_HOME", str(root))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Restorable eviction: a bare `del` here leaks the missing modules
+        # into every later test in the session (see the note in
+        # tests/hermes_cli/conftest.py).
         for mod in list(sys.modules.keys()):
             if mod.startswith("hermes_cli.config") or mod == "hermes_constants":
-                del sys.modules[mod]
+                monkeypatch.delitem(sys.modules, mod, raising=False)
         return root
 
     def test_healthy_db_stays_quiet(self, hermes_home, capsys):

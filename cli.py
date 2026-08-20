@@ -937,6 +937,18 @@ def validate_toolset(*args, **kwargs):
     return _validate_toolset(*args, **kwargs)
 
 
+def _invalid_cli_toolsets(toolsets: list[str], mcp_names: set[str]) -> list[str]:
+    """Return invalid explicit CLI toolsets after loading plugin registrations."""
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception:
+        # Plugin discovery is optional; built-in toolset validation still runs.
+        pass
+    return [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
+
+
 def _sync_process_session_id(session_id: str) -> None:
     """Keep process-local session-id consumers aligned after CLI switches."""
     from gateway.session_context import set_current_session_id
@@ -5137,7 +5149,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # live registry aliases (registered during discover_mcp_tools),
             # but discovery hasn't run yet at this point, so exclude them.
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
-            invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
+            invalid = _invalid_cli_toolsets(toolsets, mcp_names)
             if invalid:
                 self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
         

@@ -19,12 +19,19 @@ def test_no_duplicate_skills_subparser(monkeypatch):
     # argparse.ArgumentError at module load time
     import sys
 
-    # Drop the cached module so the import below really re-executes.
-    # monkeypatch.delitem restores it at teardown: a bare `del` leaves every
-    # later test in the session holding a stale `hermes_cli.main` reference
-    # while a fresh object sits in sys.modules, so their patches land on an
-    # object the code under test never sees.
+    # Drop the cached module so the import below really re-executes, and put
+    # BOTH bindings back at teardown. sys.modules is only half of it: the
+    # re-import also rebinds `main` as an attribute on the `hermes_cli`
+    # package, and that is what `from hermes_cli import main` resolves.
+    # Restoring sys.modules alone left `update_cmd._m()` — which uses exactly
+    # that form — handing every later test the throwaway module, whose
+    # PROJECT_ROOT no test had patched. That was worth ~40 failures across
+    # the update suites, all of which passed in isolation.
+    import hermes_cli
+
     monkeypatch.delitem(sys.modules, 'hermes_cli.main', raising=False)
+    if hasattr(hermes_cli, 'main'):
+        monkeypatch.setattr(hermes_cli, 'main', hermes_cli.main, raising=False)
 
     try:
         import hermes_cli.main  # noqa: F401

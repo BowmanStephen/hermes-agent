@@ -27,10 +27,26 @@ def evict_home_caching_modules(monkeypatch) -> None:
 
     ``monkeypatch.delitem`` records each eviction and pytest restores the
     original module objects at teardown, so the leak can't outlive the test.
+
+    Restoring ``sys.modules`` alone is NOT enough. Importing a submodule also
+    binds it as an attribute on its parent package, and the re-import
+    overwrites that attribute with the new module object. Restoring
+    ``sys.modules['hermes_cli.main']`` therefore leaves
+    ``hermes_cli.main`` — what ``from hermes_cli import main`` actually
+    resolves — pointing at the throwaway module. ``update_cmd._m()`` uses
+    exactly that form, so it kept handing later tests a module whose
+    ``PROJECT_ROOT`` no test had patched. Snapshot the parent attribute too.
     """
     for name in list(sys.modules):
-        if name.startswith(_HOME_CACHING_PREFIXES) or name in _HOME_CACHING_MODULES:
-            monkeypatch.delitem(sys.modules, name, raising=False)
+        if not (
+            name.startswith(_HOME_CACHING_PREFIXES) or name in _HOME_CACHING_MODULES
+        ):
+            continue
+        monkeypatch.delitem(sys.modules, name, raising=False)
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        if parent is not None and hasattr(parent, child):
+            monkeypatch.setattr(parent, child, getattr(parent, child), raising=False)
 
 
 @pytest.fixture

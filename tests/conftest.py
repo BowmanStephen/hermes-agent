@@ -735,6 +735,148 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
     monkeypatch.setattr(_kdb, "connect", _guarded_connect)
 
 
+# ── Real-checkout git write guard ──────────────────────────────────────────
+# Third sibling of the kanban / state.db guards above, for the developer's
+# actual git checkout.
+#
+# On 2026-08-19 a full ``tests/hermes_cli`` run left the working checkout
+# SHALLOW: something ran a depth-limited fetch against it, ``.git/shallow``
+# appeared, and ``git log`` collapsed from 23,926 commits to 1. Recovery was
+# ``git fetch --unshallow origin`` (objects and reflog survived), but nothing
+# stopped it happening, and a test suite must never rewrite the repository it
+# is being run from.
+#
+# Read-only plumbing is what tests legitimately need (``rev-parse``, ``log``,
+# ``describe``…), so this is an ALLOW-list: any other git subcommand aimed at
+# the real checkout raises. Tests that genuinely need to mutate a repo should
+# build one under ``tmp_path`` and point the code at it — that is the fix, not
+# the marker. ``@pytest.mark.live_system_guard_bypass`` remains as the
+# documented escape hatch, consistent with the other guards.
+
+_REAL_REPO_ROOT = PROJECT_ROOT.resolve()
+
+# Subcommands that cannot modify a repository.
+_GIT_READONLY_SUBCOMMANDS = frozenset({
+    "blame", "cat-file", "check-ignore", "count-objects", "describe", "diff",
+    "for-each-ref", "grep", "log", "ls-files", "ls-remote", "ls-tree",
+    "merge-base", "name-rev", "rev-list", "rev-parse", "shortlog", "show",
+    "show-ref", "status", "symbolic-ref", "var", "verify-pack", "version",
+})
+
+# Subcommands that act on a repository named by a positional argument rather
+# than on the one holding the cwd. ``git init /tmp/x`` and
+# ``git clone <src> /tmp/y`` both routinely run with the cwd inherited from
+# the test process (i.e. the real checkout) while touching nothing in it.
+_GIT_SUBCOMMANDS_TARGETING_AN_ARGUMENT = frozenset({"init", "clone"})
+
+
+def _git_invocation_target(cmd, cwd):
+    """Return (subcommand, target_repo) for a git argv, or None if not git."""
+    if isinstance(cmd, (str, bytes)):
+        return None
+    try:
+        parts = [os.fspath(part) for part in cmd]
+    except TypeError:
+        return None
+    if not parts or Path(parts[0]).name not in {"git", "git.exe"}:
+        return None
+
+    target = Path(cwd) if cwd is not None else Path.cwd()
+    subcommand = None
+    expect_dir = False
+    for arg in parts[1:]:
+        if expect_dir:
+            target = Path(arg)
+            expect_dir = False
+            continue
+        if arg in {"-C", "--git-dir", "--work-tree"}:
+            expect_dir = True
+            continue
+        if arg.startswith("--git-dir=") or arg.startswith("--work-tree="):
+            target = Path(arg.split("=", 1)[1])
+            continue
+        if arg.startswith("-"):
+            continue
+        subcommand = arg
+        break
+
+    if subcommand in _GIT_SUBCOMMANDS_TARGETING_AN_ARGUMENT:
+        # The repo being written is named on the command line, not implied by
+        # the cwd, so these routinely run with the cwd inherited from the test
+        # process while touching nothing in it. Parsing them exactly means
+        # knowing which flags take values (``git init -b main /tmp/repo``), so
+        # instead: if ANY argument names a path outside the checkout, that is
+        # the repo being created and this call is harmless. A bare ``git init``
+        # with no outside path still falls through to the cwd check below.
+        for arg in parts[parts.index(subcommand) + 1:]:
+            if arg.startswith("-"):
+                continue
+            try:
+                candidate = Path(arg).expanduser().resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                candidate != _REAL_REPO_ROOT
+                and _REAL_REPO_ROOT not in candidate.parents
+            ):
+                return subcommand, None
+
+    return subcommand, target
+
+
+def _guard_git_argv(cmd, cwd):
+    """Raise when ``cmd`` is a mutating git call aimed at the real checkout."""
+    parsed = _git_invocation_target(cmd, cwd)
+    if parsed is None:
+        return
+    subcommand, target = parsed
+    if subcommand is None or target is None:
+        return
+    if subcommand in _GIT_READONLY_SUBCOMMANDS:
+        return
+
+    try:
+        resolved = target.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return
+    if resolved != _REAL_REPO_ROOT and _REAL_REPO_ROOT not in resolved.parents:
+        return  # Some other repo (tmp_path clone, fixture) — fine.
+
+    raise RuntimeError(
+        f"real_repo_git_guard: refusing `git {subcommand}` against the real "
+        f"checkout ({_REAL_REPO_ROOT}). A test must not mutate the repository "
+        f"it runs from — a depth-limited fetch here once truncated the local "
+        f"history to a single commit. Build a repo under tmp_path and point "
+        f"the code at it, or mark the test "
+        f"@pytest.mark.live_system_guard_bypass if it truly needs the real one."
+    )
+
+
+@pytest.fixture(autouse=True)
+def _real_repo_git_guard(request, monkeypatch):
+    if request.node.get_closest_marker("live_system_guard_bypass") is not None:
+        return
+
+    import subprocess as _sp
+
+    _orig_run = _sp.run
+    _orig_popen = _sp.Popen
+    _orig_check_output = _sp.check_output
+    _orig_check_call = _sp.check_call
+
+    def _wrap(orig):
+        def _guarded(cmd, *args, **kwargs):
+            _guard_git_argv(cmd, kwargs.get("cwd"))
+            return orig(cmd, *args, **kwargs)
+
+        return _guarded
+
+    monkeypatch.setattr(_sp, "run", _wrap(_orig_run))
+    monkeypatch.setattr(_sp, "Popen", _wrap(_orig_popen))
+    monkeypatch.setattr(_sp, "check_output", _wrap(_orig_check_output))
+    monkeypatch.setattr(_sp, "check_call", _wrap(_orig_check_call))
+
+
 # ── Live state.db write guard ───────────────────────────────────────────────
 # Companion to the kanban guard above, for the MAIN state database.
 # ``hermes_state._ensure_test_isolation`` (the single choke point every

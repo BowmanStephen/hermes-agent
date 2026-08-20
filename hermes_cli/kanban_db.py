@@ -8451,14 +8451,24 @@ def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
     signal_fn=None,
+    default_max_runtime_seconds: Optional[int] = None,
 ) -> list[str]:
-    """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
+    """Terminate workers whose ``max_runtime_seconds`` has elapsed.
 
     Sends SIGTERM, waits a short grace window, then SIGKILL. Emits a
     ``timed_out`` event and restores the task's source phase so the next
     dispatcher tick re-spawns the same kind of worker — unless the circuit
     breaker has already given up, in which case the task stays blocked
     where ``_record_spawn_failure`` parked it.
+
+    ``default_max_runtime_seconds`` (dispatcher config
+    ``kanban.default_max_runtime_seconds``) is the fleet-wide backstop
+    applied to tasks that carry no per-task cap. Without it a task with
+    NULL ``max_runtime_seconds`` — the overwhelming majority — is skipped
+    entirely here, so a worker that keeps its heartbeat alive while making
+    no progress is bounded only by the 1-hour heartbeat backstop. A
+    per-task value always wins, including a deliberately larger one.
+    ``None``/0 keeps the old per-task-only behaviour.
 
     Runs host-local: only tasks claimed by this host are candidates
     (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a
@@ -8469,15 +8479,25 @@ def enforce_max_runtime(
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
 
+    try:
+        fallback_limit = int(default_max_runtime_seconds or 0)
+    except (TypeError, ValueError):
+        fallback_limit = 0
+    if fallback_limit < 0:
+        fallback_limit = 0
+
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
+        "       COALESCE(t.max_runtime_seconds, ?) AS effective_max_runtime, "
         "       t.max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE t.status = 'running' "
+        "  AND COALESCE(t.max_runtime_seconds, ?) > 0 "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
-        "  AND t.worker_pid IS NOT NULL"
+        "  AND t.worker_pid IS NOT NULL",
+        (fallback_limit, fallback_limit),
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
@@ -8487,7 +8507,7 @@ def enforce_max_runtime(
         # intentionally records the first time a task ever started, so retries
         # must be measured from the active task_runs row when present.
         elapsed = now - int(row["active_started_at"])
-        if elapsed < int(row["max_runtime_seconds"]):
+        if elapsed < int(row["effective_max_runtime"]):
             continue
 
         pid = int(row["worker_pid"])
@@ -8532,14 +8552,20 @@ def enforce_max_runtime(
                 payload = {
                     "pid": pid,
                     "elapsed_seconds": int(elapsed),
-                    "limit_seconds": int(row["max_runtime_seconds"]),
+                    # The limit actually enforced — which is the dispatcher
+                    # default when the task carries no per-task cap.
+                    "limit_seconds": int(row["effective_max_runtime"]),
+                    "limit_source": (
+                        "task" if row["max_runtime_seconds"] is not None
+                        else "dispatcher_default"
+                    ),
                     "sigkill": killed,
                     "retry_status": retry_status,
                 }
                 run_id = _end_run(
                     conn, tid,
                     outcome="timed_out", status="timed_out",
-                    error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
+                    error=f"elapsed {int(elapsed)}s > limit {int(row['effective_max_runtime'])}s",
                     metadata=payload,
                 )
                 _append_event(
@@ -8554,7 +8580,7 @@ def enforce_max_runtime(
         if cur.rowcount == 1:
             _record_task_failure(
                 conn, tid,
-                error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
+                error=f"elapsed {int(elapsed)}s > limit {int(row['effective_max_runtime'])}s",
                 outcome="timed_out",
                 release_claim=False,
                 end_run=False,
@@ -9846,6 +9872,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    default_max_runtime_seconds: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -9881,6 +9908,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            default_max_runtime_seconds=default_max_runtime_seconds,
         )
         _fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
@@ -9901,6 +9929,7 @@ def dispatch_once(
                 default_assignee=default_assignee,
                 max_in_progress_per_profile=max_in_progress_per_profile,
                 reconcile_orphans=reconcile_orphans,
+                default_max_runtime_seconds=default_max_runtime_seconds,
             )
             # Still under the dispatch lock: run the periodic PASSIVE WAL
             # checkpoint (see _maybe_checkpoint_wal; the -wal file size is
@@ -9928,6 +9957,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    default_max_runtime_seconds: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -9995,7 +10025,9 @@ def _dispatch_once_locked(
     )
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
-    result.timed_out = enforce_max_runtime(conn)
+    result.timed_out = enforce_max_runtime(
+        conn, default_max_runtime_seconds=default_max_runtime_seconds,
+    )
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
     # Count tasks already running so max_spawn enforces concurrency rather

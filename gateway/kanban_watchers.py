@@ -1358,6 +1358,31 @@ class GatewayKanbanWatchersMixin:
                 default_assignee,
             )
 
+        # Read kanban.default_max_runtime_seconds — fleet-wide runtime
+        # backstop for tasks with no per-task max_runtime_seconds (which is
+        # almost all of them). Without it enforce_max_runtime skips those
+        # rows entirely, so a worker that keeps heartbeating while making no
+        # progress is bounded only by the 1-hour heartbeat backstop. A
+        # per-task value always wins. 0/unset keeps the old behaviour.
+        raw_default_runtime = kanban_cfg.get("default_max_runtime_seconds", 0)
+        try:
+            default_max_runtime_seconds = int(raw_default_runtime or 0)
+        except (TypeError, ValueError):
+            logger.warning(
+                "kanban dispatcher: invalid kanban.default_max_runtime_seconds=%r; "
+                "no fleet-wide runtime cap will be applied",
+                raw_default_runtime,
+            )
+            default_max_runtime_seconds = 0
+        if default_max_runtime_seconds < 0:
+            default_max_runtime_seconds = 0
+        if default_max_runtime_seconds:
+            logger.info(
+                "kanban dispatcher: default_max_runtime_seconds=%d "
+                "(per-task max_runtime_seconds overrides it)",
+                default_max_runtime_seconds,
+            )
+
         # Read kanban.max_in_progress_per_profile — per-profile concurrency
         # cap (#21582). When set, no single profile gets more than N
         # workers running at once, even if the global max_in_progress
@@ -1481,6 +1506,7 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                     reconcile_orphans=reconcile_orphans,
+                    default_max_runtime_seconds=default_max_runtime_seconds,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):

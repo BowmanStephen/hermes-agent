@@ -314,6 +314,102 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
         _kb._pid_alive = original_alive
 
 
+def _run_overrunning_worker(conn, *, elapsed_seconds, max_runtime_seconds=None):
+    """Create a running task whose active run started ``elapsed_seconds`` ago."""
+    tid = kb.create_task(
+        conn, title="long job", assignee="worker",
+        max_runtime_seconds=max_runtime_seconds,
+    )
+    kb.claim_task(conn, tid)
+    kb._set_worker_pid(conn, tid, os.getpid())
+    old_started = int(time.time()) - elapsed_seconds
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id = ?", (old_started, tid),
+        )
+        conn.execute(
+            "UPDATE task_runs SET started_at = ? "
+            "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+            (old_started, tid),
+        )
+    return tid
+
+
+def test_default_max_runtime_bounds_tasks_without_a_per_task_cap(kanban_home):
+    """A task with NULL max_runtime_seconds is bounded by the dispatcher's
+    ``kanban.default_max_runtime_seconds``; without it the worker runs on."""
+    import hermes_cli.kanban_db as _kb
+    original_alive = _kb._pid_alive
+    _kb._pid_alive = lambda pid: False
+
+    try:
+        conn = kb.connect()
+        try:
+            # No fleet-wide default configured: NULL cap == no enforcement.
+            tid = _run_overrunning_worker(conn, elapsed_seconds=3600)
+            assert kb.enforce_max_runtime(conn, signal_fn=lambda *_: None) == []
+            assert kb.get_task(conn, tid).status == "running"
+
+            # With the default, the same task is terminated and requeued.
+            timed_out = kb.enforce_max_runtime(
+                conn, signal_fn=lambda *_: None,
+                default_max_runtime_seconds=900,
+            )
+            assert tid in timed_out
+            assert kb.get_task(conn, tid).status == "ready"
+
+            event = next(
+                e for e in kb.list_events(conn, tid) if e.kind == "timed_out"
+            )
+            assert event.payload["limit_seconds"] == 900
+            assert event.payload["limit_source"] == "dispatcher_default"
+        finally:
+            conn.close()
+    finally:
+        _kb._pid_alive = original_alive
+
+
+def test_per_task_max_runtime_overrides_the_dispatcher_default(kanban_home):
+    """An explicit per-task cap wins over the fleet-wide default, including
+    a deliberately larger one (a task allowed to run long stays running)."""
+    import hermes_cli.kanban_db as _kb
+    original_alive = _kb._pid_alive
+    _kb._pid_alive = lambda pid: False
+
+    try:
+        conn = kb.connect()
+        try:
+            # Per-task cap is LARGER than the default: not yet overrun.
+            patient = _run_overrunning_worker(
+                conn, elapsed_seconds=300, max_runtime_seconds=7200,
+            )
+            timed_out = kb.enforce_max_runtime(
+                conn, signal_fn=lambda *_: None,
+                default_max_runtime_seconds=60,
+            )
+            assert patient not in timed_out
+            assert kb.get_task(conn, patient).status == "running"
+
+            # Per-task cap is SMALLER: enforced at the task's own limit.
+            strict = _run_overrunning_worker(
+                conn, elapsed_seconds=300, max_runtime_seconds=30,
+            )
+            timed_out = kb.enforce_max_runtime(
+                conn, signal_fn=lambda *_: None,
+                default_max_runtime_seconds=7200,
+            )
+            assert strict in timed_out
+            event = next(
+                e for e in kb.list_events(conn, strict) if e.kind == "timed_out"
+            )
+            assert event.payload["limit_seconds"] == 30
+            assert event.payload["limit_source"] == "task"
+        finally:
+            conn.close()
+    finally:
+        _kb._pid_alive = original_alive
+
+
 
 
 

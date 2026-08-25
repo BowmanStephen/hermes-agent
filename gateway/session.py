@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -2297,11 +2297,13 @@ class SessionStore:
         source: Optional[SessionSource],
         display_name: Optional[str] = None,
         include_compression_ancestors: bool = False,
+        db: Optional[Any] = None,
     ) -> None:
         """Persist the routing peer for an existing gateway session row."""
-        if not self._db or not source:
+        db = self._db if db is None else db
+        if not db or not source:
             return
-        recorder = getattr(self._db, "record_gateway_session_peer", None)
+        recorder = getattr(db, "record_gateway_session_peer", None)
         if not callable(recorder):
             return
         try:
@@ -2952,8 +2954,19 @@ class SessionStore:
             else:
                 self._save_entries()
 
-        # SQLite operations outside the lock (unchanged).
-        if self._db and db_end_session_id:
+        # SQLite operations outside the lock.
+        db_handle = cast(Any, self._db)
+        if db_handle and prev_session_id and db_create_kwargs:
+            try:
+                _get_session = getattr(db_handle, "get_session", None)
+                if callable(_get_session) and _get_session(prev_session_id) is None:
+                    db_create_kwargs["parent_session_id"] = None
+                    db_create_kwargs["model_config"] = None
+            except Exception:
+                db_create_kwargs["parent_session_id"] = None
+                db_create_kwargs["model_config"] = None
+
+        if db_handle and db_end_session_id:
             # Use the specific reset reason so state.db is auditable (e.g.
             # "resume_pending_expired" is distinguishable from a normal
             # "session_reset" caused by idle/daily expiry).
@@ -2964,11 +2977,11 @@ class SessionStore:
                 # (agent_close / ws_orphan_reap), which first-reason-wins
                 # end_session would preserve — leaving the reset session
                 # resurrectable by stale-route recovery (#61220, #61993).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
+                _promote = getattr(db_handle, "promote_to_session_reset", None)
                 if callable(_promote):
                     _promote(db_end_session_id, _db_end_reason)
                 else:
-                    self._db.end_session(db_end_session_id, _db_end_reason)
+                    db_handle.end_session(db_end_session_id, _db_end_reason)
             except Exception as e:
                 # A failed end-write leaves a zombie open row still holding
                 # this chat's session_key: restart recovery will resolve the
@@ -2981,20 +2994,21 @@ class SessionStore:
                     db_end_session_id, session_key, e,
                 )
 
-        if self._db and db_create_kwargs:
+        if db_handle and db_create_kwargs:
             try:
-                self._db.create_session(**db_create_kwargs)
+                db_handle.create_session(**db_create_kwargs)
                 self._record_gateway_session_peer(
                     session_id,
                     session_key,
                     source,
                     display_name=entry.display_name,
+                    db=db_handle,
                 )
             except Exception as e:
                 # The row will be self-healed with full identity by the next
                 # per-turn peer refresh (record_gateway_session_peer now
-                # INSERTs on missing row, #82616) — but the failure itself is
-                # a routing hazard and must be visible, not a bare print.
+                # INSERTs on missing row, #82616) — but the failure itself
+                # is a routing hazard and must be visible, not a bare print.
                 logger.warning(
                     "Failed to create session row %s for %s: %s — deferring "
                     "to the self-healing peer refresh on the next turn",
@@ -3441,9 +3455,10 @@ class SessionStore:
             # Do not manufacture a dangling self-referential FK on reset: keep
             # the reset usable as a new root session when the old row is absent.
             db_parent_session_id = db_end_session_id
-            if self._db and db_parent_session_id:
+            db_handle = cast(Any, self._db)
+            if db_handle and db_parent_session_id:
                 try:
-                    _get_session = getattr(self._db, "get_session", None)
+                    _get_session = getattr(db_handle, "get_session", None)
                     if callable(_get_session) and _get_session(db_parent_session_id) is None:
                         db_parent_session_id = None
                 except Exception:
@@ -3472,17 +3487,17 @@ class SessionStore:
                 ),
             }
 
-        if self._db and db_end_session_id:
+        if db_handle and db_end_session_id:
             try:
                 # Promote (not plain end_session): an accidental
                 # agent_close/ws_orphan_reap end must not survive an explicit
                 # user reset, or recovery resurrects the reset session
                 # (#61993 — the user's /new was silently undone).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
+                _promote = getattr(db_handle, "promote_to_session_reset", None)
                 if callable(_promote):
                     _promote(db_end_session_id, "session_reset")
                 else:
-                    self._db.end_session(db_end_session_id, "session_reset")
+                    db_handle.end_session(db_end_session_id, "session_reset")
             except Exception as e:
                 # Zombie hazard — see the get_or_create twin path (#82616).
                 logger.warning(
@@ -3492,14 +3507,15 @@ class SessionStore:
                     db_end_session_id, session_key, e,
                 )
 
-        if self._db and db_create_kwargs:
+        if db_handle and db_create_kwargs:
             try:
-                self._db.create_session(**db_create_kwargs)
+                db_handle.create_session(**db_create_kwargs)
                 self._record_gateway_session_peer(
                     session_id,
                     session_key,
                     old_entry.origin,
                     display_name=new_entry.display_name if new_entry else None,
+                    db=db_handle,
                 )
             except Exception as e:
                 logger.warning(

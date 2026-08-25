@@ -61,6 +61,7 @@ def _make_adapter():
     from plugins.platforms.discord.adapter import DiscordAdapter
 
     adapter = object.__new__(DiscordAdapter)
+    adapter.platform = Platform.DISCORD
     adapter.config = MagicMock()
     adapter.config.extra = {}
     return adapter
@@ -152,5 +153,54 @@ async def test_retry_preserves_channel_prompt(monkeypatch):
     assert result == "ok"
     retried_event = runner._handle_message.await_args.args[0]
     assert retried_event.channel_prompt == "Channel prompt"
+
+
+def test_slash_event_carries_thread_parent_for_channel_overrides():
+    """Thread slash commands must inherit the parent channel override."""
+    import discord
+
+    adapter = _make_adapter()
+    parent = SimpleNamespace(id=456, name="general", topic=None)
+    channel = discord.Thread()
+    channel.id = 123
+    channel.parent_id = 456
+    channel.parent = parent
+    channel.name = "research"
+    channel.guild = SimpleNamespace(name="Guild")
+    interaction = SimpleNamespace(
+        channel=channel,
+        channel_id=123,
+        user=SimpleNamespace(id=7, display_name="alice"),
+    )
+
+    event = adapter._build_slash_event(interaction, "/status")
+
+    assert event.source.thread_id == "123"
+    assert event.source.parent_chat_id == "456"
+
+
+@pytest.mark.asyncio
+async def test_thread_slash_starter_carries_parent_for_channel_overrides():
+    """The starter turn from /thread must preserve its parent channel too."""
+    import discord
+
+    adapter = _make_adapter()
+    parent = SimpleNamespace(id=456, name="general", topic=None)
+    channel = discord.Thread()
+    channel.id = 123
+    channel.parent = parent
+    channel.parent_id = 456
+    channel.name = "research"
+    interaction = SimpleNamespace(
+        channel=channel,
+        guild=None,
+        user=SimpleNamespace(id=7, display_name="alice"),
+    )
+    adapter.handle_message = AsyncMock()
+
+    await adapter._dispatch_thread_session(interaction, "123", "research", "hello")
+
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.parent_chat_id == "456"
 
 

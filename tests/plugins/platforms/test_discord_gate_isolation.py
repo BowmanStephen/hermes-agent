@@ -339,6 +339,27 @@ class TestYamlBridgeSeeding:
         assert os.getenv("DISCORD_ALLOWED_CHANNELS") is None
         assert os.getenv("DISCORD_ALLOWED_USERS") is None
 
+    def test_profile_scoped_behavior_flags_are_seeded_without_env_leak(self, monkeypatch):
+        """Channel behavior flags must remain isolated between multiplexed profiles."""
+        from agent import secret_scope
+        from plugins.platforms.discord.adapter import _apply_yaml_config
+
+        monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+        monkeypatch.delenv("DISCORD_REACTIONS", raising=False)
+        monkeypatch.setattr(secret_scope, "_MULTIPLEX_ACTIVE", True)
+        token = secret_scope.set_secret_scope({})
+        try:
+            seeded = _apply_yaml_config(
+                {}, {"auto_thread": False, "reactions": False},
+            )
+        finally:
+            secret_scope.reset_secret_scope(token)
+
+        assert seeded["auto_thread"] is False
+        assert seeded["reactions"] is False
+        assert os.getenv("DISCORD_AUTO_THREAD") is None
+        assert os.getenv("DISCORD_REACTIONS") is None
+
     def test_first_writer_env_does_not_mask_second_profile_extras(self, monkeypatch):
         """End-to-end shape of the original repro: profile A bridges env first;
         profile B (scoped load) still gets ITS channels via extras."""

@@ -939,7 +939,22 @@ def _invalid_cli_toolsets(toolsets: list[str], mcp_names: set[str]) -> list[str]
     except Exception:
         # Plugin discovery is optional; built-in toolset validation still runs.
         pass
-    return [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
+    # Toolsets saved for a plugin the user configured (tracked in
+    # ``known_plugin_toolsets`` by the tools-config save flow) are valid even
+    # when that plugin failed to register at startup.
+    known_plugin_toolsets = CLI_CONFIG.get("known_plugin_toolsets") or {}
+    configured_plugin_toolsets = (
+        set(known_plugin_toolsets.get("cli") or [])
+        if isinstance(known_plugin_toolsets, dict)
+        else set()
+    )
+    return [
+        t
+        for t in toolsets
+        if not validate_toolset(t)
+        and t not in mcp_names
+        and t not in configured_plugin_toolsets
+    ]
 
 
 def _sync_process_session_id(session_id: str) -> None:

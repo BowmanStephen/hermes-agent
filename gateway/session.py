@@ -3436,6 +3436,21 @@ class SessionStore:
                     _reset_origin_json = json.dumps(old_entry.origin.to_dict())
                 except Exception:
                     _reset_origin_json = None
+            # The JSON routing index can outlive its SQLite predecessor row
+            # (for example after a partial state restore or a legacy DB repair).
+            # Do not manufacture a dangling self-referential FK on reset: keep
+            # the reset usable as a new root session when the old row is absent.
+            db_parent_session_id = db_end_session_id
+            if self._db and db_parent_session_id:
+                try:
+                    _get_session = getattr(self._db, "get_session", None)
+                    if callable(_get_session) and _get_session(db_parent_session_id) is None:
+                        db_parent_session_id = None
+                except Exception:
+                    # A transient read failure must not turn a user-requested
+                    # reset into a guaranteed FK failure. The next peer refresh
+                    # can restore routing metadata once the DB is available.
+                    db_parent_session_id = None
             db_create_kwargs = {
                 "session_id": session_id,
                 "source": old_entry.platform.value if old_entry.platform else "unknown",
@@ -3449,8 +3464,12 @@ class SessionStore:
                 # #12857) — see the get_or_create twin path.
                 "origin_json": _reset_origin_json,
                 "display_name": old_entry.display_name,
-                "parent_session_id": db_end_session_id,
-                "model_config": {"_reset_from": db_end_session_id},
+                "parent_session_id": db_parent_session_id,
+                "model_config": (
+                    {"_reset_from": db_parent_session_id}
+                    if db_parent_session_id
+                    else None
+                ),
             }
 
         if self._db and db_end_session_id:

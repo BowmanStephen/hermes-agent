@@ -883,3 +883,31 @@ class TestSameMatrixRoomThreadScoping:
         caller = self._msrc(thread_id="thread-a")
         victim_origin = self._msrc(thread_id="thread-b")
         assert runner._same_matrix_room(caller, victim_origin) is False
+
+
+def test_reset_creates_root_when_routing_predecessor_row_is_missing(tmp_path):
+    """A stale routing entry must not make Discord /reset violate the parent FK."""
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    from hermes_state import SessionDB
+    from typing import cast
+
+    store = SessionStore(
+        sessions_dir=tmp_path / "sessions",
+        config=GatewayConfig(),
+    )
+    entry = store.get_or_create_session(_make_event(text="hello").source)
+    db = cast(SessionDB, store._db)
+    conn = db._conn
+    assert conn is not None
+    conn.execute("DELETE FROM sessions WHERE id = ?", (entry.session_id,))
+    conn.commit()
+
+    reset = store.reset_session(entry.session_key)
+
+    assert reset is not None
+    row = db.get_session(reset.session_id)
+    assert row is not None
+    assert row["parent_session_id"] is None
+    assert row["model_config"] is None
+    db.close()

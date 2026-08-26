@@ -36,6 +36,8 @@ def _write_self_marker(marker, *, stale: bool = False):
         "target_pid": os.getpid(),
         "target_start_time": status_mod._get_process_start_time(os.getpid()),
         "stopper_pid": os.getpid(),
+        "stopper_argv": "hermes gateway stop",
+        "stopper_parent_pid": 1,
         "written_at": written_at,
     }
     marker.write_text(json.dumps(record), encoding="utf-8")

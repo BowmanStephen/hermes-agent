@@ -67,6 +67,27 @@ class TestSnapshotShutdownContext:
         assert "takeover_marker" in ctx
         assert ctx["takeover_marker_for_self"] is True
 
+    def test_snapshots_planned_stop_initiator_before_marker_is_consumed(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        marker = tmp_path / ".gateway-planned-stop.json"
+        marker.write_text(
+            json.dumps({
+                "target_pid": os.getpid(),
+                "stopper_pid": 12345,
+                "stopper_argv": "hermes update --yes --gateway",
+                "stopper_parent_pid": 67890,
+            }),
+            encoding="utf-8",
+        )
+
+        ctx = sf.snapshot_shutdown_context(signal.SIGTERM)
+
+        payload = json.loads(ctx["planned_stop_marker"])
+        assert payload["stopper_argv"] == "hermes update --yes --gateway"
+        assert payload["stopper_parent_pid"] == 67890
+
 
 # ---------------------------------------------------------------------------
 # format_context_for_log / context_as_json

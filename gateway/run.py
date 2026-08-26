@@ -32899,6 +32899,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Set up signal handlers
     def shutdown_signal_handler(received_signal=None):
         nonlocal _signal_initiated_shutdown
+        # Snapshot before consuming planned-stop/takeover markers.  The
+        # marker contains the initiating CLI argv and is the only durable
+        # attribution available once an update/restart helper exits.
+        try:
+            from gateway.shutdown_forensics import (
+                format_context_for_log,
+                snapshot_shutdown_context,
+                spawn_async_diagnostic,
+            )
+            _shutdown_ctx = snapshot_shutdown_context(received_signal)
+        except Exception as _e:
+            _shutdown_ctx = None
+            logger.debug("snapshot_shutdown_context failed: %s", _e)
+
         # Planned --replace takeover check: when a sibling gateway is
         # taking over via --replace, it wrote a marker naming this PID
         # before sending SIGTERM. If present, treat the signal as a
@@ -32926,23 +32940,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 planned_stop = consume_planned_stop_marker_for_self()
             except Exception as e:
                 logger.debug("Planned stop marker check failed: %s", e)
-
-        # Fast (<10ms) snapshot of who's asking us to shut down — runs
-        # synchronously inside the asyncio signal handler, so we keep it
-        # purely stdlib + /proc reads, no subprocesses.  See PR #15826
-        # (May 2026): the previous implementation called `ps aux` here
-        # synchronously, blocking the event loop for up to 3s while
-        # adapter teardown couldn't begin.
-        try:
-            from gateway.shutdown_forensics import (
-                format_context_for_log,
-                snapshot_shutdown_context,
-                spawn_async_diagnostic,
-            )
-            _shutdown_ctx = snapshot_shutdown_context(received_signal)
-        except Exception as _e:
-            _shutdown_ctx = None
-            logger.debug("snapshot_shutdown_context failed: %s", _e)
 
         if planned_takeover:
             logger.info(

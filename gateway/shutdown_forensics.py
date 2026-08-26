@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -248,6 +249,20 @@ def spawn_async_diagnostic(
     except OSError:
         return None
 
+    timeout_bin = shutil.which("timeout")
+    if timeout_bin:
+        command = [timeout_bin, f"{timeout_seconds:.0f}", "bash", "-c", script]
+    else:
+        # macOS does not ship GNU ``timeout``.  Use a tiny Python supervisor
+        # so diagnostics remain bounded instead of silently failing there.
+        runner = (
+            "import subprocess,sys; "
+            "\ntry: subprocess.run(['bash','-c',sys.argv[2]], "
+            "timeout=float(sys.argv[1]), check=False)"
+            "\nexcept subprocess.TimeoutExpired: pass"
+        )
+        command = [sys.executable, "-c", runner, str(timeout_seconds), script]
+
     try:
         # Detach from our process group so the subprocess survives even
         # if systemd kills our cgroup with KillMode=control-group (which
@@ -255,7 +270,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            command,
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

@@ -74,6 +74,19 @@ class TestSnapshotShutdownContext:
 
 class TestFormatters:
 
+    def test_format_context_redacts_sensitive_parent_option_values(self):
+        secret = "shutdown-parent-secret"
+        rendered = sf.format_context_for_log({
+            "signal": "SIGTERM",
+            "parent": {
+                "pid": 12,
+                "name": "hermes",
+                "cmdline": f"hermes gateway run --key {secret}",
+            },
+        })
+        assert secret not in rendered
+        assert "gateway run" in rendered
+
 
     def test_context_as_json_handles_unserialisable_values(self):
         ctx = {"signal": "SIGTERM", "weird": object()}

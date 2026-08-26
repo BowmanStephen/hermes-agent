@@ -2220,6 +2220,12 @@ def write_planned_stop_marker(target_pid: int) -> bool:
             "target_pid": target_pid,
             "target_start_time": target_start_time,
             "stopper_pid": os.getpid(),
+            # Keep the initiating argv with the short-lived marker.  The
+            # gateway's shutdown handler can snapshot this before consuming
+            # the marker, which makes planned SIGTERMs attributable even when
+            # the stopper has already exited (notably launchd/update paths).
+            "stopper_argv": " ".join(sys.argv)[:500],
+            "stopper_parent_pid": os.getppid(),
             "written_at": _utc_now_iso(),
         }
         _write_json_file(_get_planned_stop_marker_path(), record)

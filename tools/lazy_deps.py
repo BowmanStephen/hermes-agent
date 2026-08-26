@@ -212,6 +212,11 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "platform.discord": (
         "discord.py[voice]==2.7.1",
         "brotlicffi==1.2.0.1",
+        # The Discord voice mixer combines outgoing PCM frames with numpy.
+        # Keep this beside the platform's other lazy dependencies: the
+        # separate `voice` extra is for local STT/wake-word audio and is not
+        # installed when Discord voice support is enabled.
+        "numpy==2.4.3",
         # discord.py pulls aiohttp transitively (>=3.7.4,<4) as its HTTP
         # backbone. Pin the patched floor here too so the lazy Discord path
         # can't keep an already-installed vulnerable aiohttp satisfying that

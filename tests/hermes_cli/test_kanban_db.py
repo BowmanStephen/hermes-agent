@@ -430,6 +430,27 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         assert kb.get_task(conn, t2).status == "blocked"
 
 
+def test_dispatcher_does_not_promote_initially_blocked_card(kanban_home):
+    """A human-ops card remains blocked across a real dispatcher tick."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="wait for operator",
+            assignee="setup",
+            initial_status="blocked",
+        )
+        result = kb.dispatch_once(conn, spawn_fn=lambda *args, **kwargs: 4242)
+        task = kb.get_task(conn, task_id)
+    finally:
+        conn.close()
+
+    assert result.promoted == 0
+    assert result.spawned == []
+    assert task is not None
+    assert task.status == "blocked"
+
+
 
 
 # ---------------------------------------------------------------------------

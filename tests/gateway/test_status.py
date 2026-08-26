@@ -978,6 +978,8 @@ class TestPlannedStopMarker:
         assert payload["target_pid"] == 12345
         assert payload["target_start_time"] == 42
         assert payload["stopper_pid"] == os.getpid()
+        assert payload["stopper_argv"] == " ".join(status.sys.argv)[:500]
+        assert payload["stopper_parent_pid"] == os.getppid()
         assert "written_at" in payload
 
 

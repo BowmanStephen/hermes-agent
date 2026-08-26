@@ -3125,6 +3125,39 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
 _paid_lane_warned: set = set()
 
 
+def _is_aux_provider_enabled(provider: Optional[str]) -> bool:
+    """Honor ``providers.<name>.enabled`` for every auxiliary route.
+
+    Auxiliary clients have their own resolver and cache, so the main runtime's
+    provider gate does not protect explicit auxiliary overrides, automatic
+    discovery, MoA slots, or clients created before a config change. Keep the
+    policy check here, next to those auxiliary entry points, while delegating
+    value semantics to the canonical ``is_provider_enabled`` helper.
+    """
+    normalized = _normalize_aux_provider(provider)
+    if normalized in {"", "auto", "main", "actual", "custom"}:
+        return True
+    try:
+        from hermes_cli.config import is_provider_enabled, load_config_readonly
+
+        config = load_config_readonly()
+        providers = config.get("providers") if isinstance(config, dict) else None
+        if not isinstance(providers, dict):
+            return True
+        provider_config = providers.get(normalized)
+        return not (
+            isinstance(provider_config, dict)
+            and not is_provider_enabled(provider_config)
+        )
+    except Exception:
+        logger.debug(
+            "Could not read provider enablement for auxiliary provider %s",
+            normalized,
+            exc_info=True,
+        )
+        return True
+
+
 def _is_free_model(model: Optional[str]) -> bool:
     """True when ``model`` is a free SKU (``:free`` suffix or ``stealth/`` prefix).
 
@@ -3171,6 +3204,12 @@ def _warn_paid_lane_once(model: str) -> None:
 
 
 def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
+    if not _is_aux_provider_enabled("openrouter"):
+        logger.info(
+            "Auxiliary OpenRouter route skipped because "
+            "providers.openrouter.enabled is false"
+        )
+        return None, None
     free_only, cfg_model = _aux_openrouter_settings()
     or_model = model or cfg_model
     if free_only and not _is_free_model(or_model):
@@ -6666,6 +6705,14 @@ def resolve_provider_client(
                 explicit_base_url = None
                 explicit_api_key = None
 
+    if provider != "auto" and not _is_aux_provider_enabled(provider):
+        logger.info(
+            "Auxiliary provider %s skipped because providers.%s.enabled is false",
+            provider,
+            provider,
+        )
+        return None, None
+
     # Universal model-resolution fallback for concrete providers. ``auto`` is
     # intentionally excluded: `_resolve_auto(main_runtime=...)` returns the
     # model paired with the provider it actually selected. Pre-filling an auto
@@ -8325,7 +8372,20 @@ def _get_cached_client(
     with _client_cache_lock:
         if cache_key in _client_cache:
             cached_client, cached_default, cached_loop = _client_cache[cache_key]
-            if async_mode:
+            effective_provider = _effective_provider_for_client(
+                cached_client,
+                _normalize_aux_provider(provider),
+            )
+            if _is_openrouter_client(cached_client):
+                effective_provider = "openrouter"
+            if not _is_aux_provider_enabled(effective_provider):
+                # A provider can be disabled while the gateway is running.
+                # Drop the cache reference so no new auxiliary call reuses it.
+                # Do not close here: another caller may still own an in-flight
+                # request on this client.
+                del _client_cache[cache_key]
+                cached_client = None
+            elif async_mode:
                 # Validate: the cached client must be bound to the CURRENT,
                 # OPEN loop.  If the loop changed or was closed, the httpx
                 # transport inside is dead — force-close and replace.
@@ -8345,7 +8405,7 @@ def _get_cached_client(
                 )
                 _close_cached_client(cached_client, close_async=owner_loop_closed)
                 del _client_cache[cache_key]
-            else:
+            elif cached_client is not None:
                 effective = _compat_model(cached_client, model, cached_default)
                 return cached_client, effective
     # Build outside the lock.

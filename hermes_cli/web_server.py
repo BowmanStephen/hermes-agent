@@ -4707,6 +4707,89 @@ def _dashboard_spawn_executable() -> str:
     return sys.executable
 
 
+def _named_profile_from_action(subcommand: List[str]) -> Optional[str]:
+    """Return the named-profile prefix emitted by :func:`_profile_cli_args`.
+
+    Dashboard-owned profile actions always put the selector before the real
+    subcommand.  Deliberately do not scan the rest of argv: values after the
+    command may legitimately contain ``-p`` / ``--profile`` for a nested
+    process (for example ``mcp add --args``).
+    """
+    if len(subcommand) >= 2 and subcommand[0] in {"-p", "--profile"}:
+        requested = str(subcommand[1]).strip()
+        return requested or None
+    if subcommand and str(subcommand[0]).startswith("--profile="):
+        requested = str(subcommand[0]).split("=", 1)[1].strip()
+        return requested or None
+    return None
+
+
+def _profile_action_environment(
+    subcommand: List[str],
+    env_overrides: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Build a detached-action env without cross-profile credential drift.
+
+    The dashboard loads its own ``.env`` into process-global ``os.environ``.
+    Copying that mapping into ``hermes -p <other> ...`` lets the named child
+    see the dashboard profile's platform credentials *before* its own dotenv
+    is loaded.  A supposedly A2A-only profile can then claim the default
+    Discord token and bind the default API/BlueBubbles ports.
+
+    Named-profile children start from Hermes' standard scrubbed subprocess
+    environment, then drop every known profile-managed key plus every key
+    declared by the dashboard/default profile dotenv files.  The target home
+    is pinned explicitly; ``hermes_cli.main`` subsequently loads that
+    profile's own ``.env`` through the normal startup path.  Non-profile
+    actions preserve the historical environment exactly.
+    """
+    profile = _named_profile_from_action(subcommand)
+    if profile is None:
+        action_env = dict(os.environ)
+    else:
+        from hermes_cli.env_loader import (
+            _env_keys_defined_in_dotenv,
+            _known_hermes_env_keys,
+            get_secret_source_values,
+        )
+        from tools.environments.local import build_subprocess_env
+
+        target_home = _resolve_profile_dir(profile)
+        action_env = build_subprocess_env(base=os.environ, scrub_secrets=True)
+
+        profile_keys = _known_hermes_env_keys()
+        try:
+            from hermes_constants import get_default_hermes_root, get_hermes_home
+
+            source_homes = {get_default_hermes_root(), get_hermes_home()}
+        except Exception:
+            source_homes = set()
+        for source_home in source_homes:
+            profile_keys.update(
+                _env_keys_defined_in_dotenv(Path(source_home) / ".env")
+            )
+            # Secret managers can contribute locally named credentials that
+            # do not appear in .env or the setup wizard's known-key catalog.
+            # The dashboard has already hydrated its own sources, so their
+            # cached key names define additional profile-owned boundaries.
+            profile_keys.update(get_secret_source_values(source_home).keys())
+        for key in profile_keys:
+            action_env.pop(key, None)
+
+        # Pin the child before import-time startup runs.  The explicit -p flag
+        # remains authoritative and resolves the same validated directory.
+        action_env["HERMES_HOME"] = str(target_home)
+        from hermes_constants import apply_subprocess_home_env
+
+        apply_subprocess_home_env(action_env)
+
+    action_env["HERMES_NONINTERACTIVE"] = "1"
+    action_env.pop("_HERMES_GATEWAY", None)
+    if env_overrides:
+        action_env.update(env_overrides)
+    return action_env
+
+
 def _spawn_hermes_action(
     subcommand: List[str],
     name: str,
@@ -4733,15 +4816,14 @@ def _spawn_hermes_action(
     # trip the in-process restart-loop guard and exit 1 — silently failing the
     # dashboard's auto-restart paths. The gateway's own restart watcher already
     # drops it (gateway/run.py); mirror that here (#52470).
-    action_env = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
-    action_env.pop("_HERMES_GATEWAY", None)
+    action_env = _profile_action_environment(subcommand, env_overrides)
 
     popen_kwargs: Dict[str, Any] = {
         "cwd": str(PROJECT_ROOT),
         "stdin": subprocess.DEVNULL,
         "stdout": log_file,
         "stderr": subprocess.STDOUT,
-        "env": {**action_env, **(env_overrides or {})},
+        "env": action_env,
     }
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = windows_detach_flags()

@@ -233,6 +233,34 @@ def _get_runtime_status_path() -> Path:
     return _get_pid_path().with_name(_RUNTIME_STATUS_FILE)
 
 
+def _ensure_runtime_status_write_is_isolated(home: Path) -> None:
+    """Refuse status writes to the production home from a test process.
+
+    Some tests intentionally rebuild ``os.environ`` with ``clear=True`` to
+    exercise missing configuration.  If that also removes ``HERMES_HOME``,
+    the gateway status writer would silently fall back to the operator's live
+    ``~/.hermes/gateway_state.json``.  Keep the test marker as the authority
+    and fail closed at this final write boundary, where every status writer
+    converges.
+    """
+    if not os.environ.get("HERMES_TEST_ISOLATION"):
+        return
+    if os.environ.get("HERMES_STATE_DB_GUARD_BYPASS") == "1":
+        return
+    try:
+        production_home = _get_platform_default_hermes_home().resolve()
+        if _same_hermes_home(home, production_home):
+            raise RuntimeError(
+                "test isolation refused gateway status write to production home"
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            "test isolation could not verify gateway status write destination"
+        ) from exc
+
+
 def _get_lock_dir() -> Path:
     """Return the machine-local directory for token-scoped gateway locks."""
     override = os.getenv("HERMES_GATEWAY_LOCK_DIR")
@@ -1185,6 +1213,7 @@ def write_runtime_status(
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
+    _ensure_runtime_status_write_is_isolated(path.parent)
     payload = _read_json_file(path) or _build_runtime_status_record()
     previous_payload = copy.deepcopy(payload)
     current_record = _build_pid_record()

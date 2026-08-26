@@ -285,9 +285,11 @@ def spawn_async_diagnostic(
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:
     """Render a shutdown context dict as a single, scannable log line."""
+    from agent.redact import redact_command_line
+
     sig = ctx.get("signal", "?")
     parent = ctx.get("parent") or {}
-    parent_cmd = parent.get("cmdline", "(unknown)")
+    parent_cmd = redact_command_line(parent.get("cmdline", "(unknown)"))
     parent_name = parent.get("name") or "?"
     parent_pid = parent.get("pid") or "?"
     under_systemd = "yes" if ctx.get("under_systemd") else "no"

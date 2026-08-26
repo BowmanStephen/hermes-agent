@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import threading
+from typing import Sequence
 from urllib.parse import unquote_plus
 
 # Basenames treated as ``.env`` files by _command_reads_env_file. Imported
@@ -1139,6 +1140,51 @@ def redact_terminal_output(
     cmd = command or ""
     code_file = not (is_env_dump_command(cmd) or _command_reads_env_file(cmd))
     return redact_sensitive_text(output, force=force, code_file=code_file)
+
+
+_SENSITIVE_COMMAND_OPTIONS = frozenset({
+    "--key", "--api-key", "--token", "--auth-token",
+    "--password", "--secret", "--client-secret", "--access-token",
+    "--refresh-token",
+})
+
+
+def redact_command_argv(argv: Sequence[object]) -> list[str]:
+    """Return a safe, attribution-preserving representation of command argv.
+
+    Generic text redaction cannot reliably identify opaque values supplied as
+    separate arguments (for example ``--key opaque-value``). Keep command and
+    flag names for diagnostics, but never retain values for common credential
+    options; apply the canonical redactor to all other tokens.
+    """
+    safe: list[str] = []
+    tokens = [str(token) for token in argv]
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        option, separator, _value = token.partition("=")
+        if option in _SENSITIVE_COMMAND_OPTIONS:
+            safe.append(f"{option}=[REDACTED]" if separator else option)
+            if not separator and index + 1 < len(tokens):
+                next_token = tokens[index + 1]
+                if not next_token.startswith("-"):
+                    safe.append("[REDACTED]")
+                    index += 1
+        else:
+            safe.append(redact_sensitive_text(token, force=True, code_file=True))
+        index += 1
+    return safe
+
+
+def redact_command_line(command: object) -> str:
+    """Redact a printable command line while preserving command/flag names."""
+    if command is None:
+        return ""
+    try:
+        argv = shlex.split(str(command))
+    except ValueError:
+        argv = str(command).split()
+    return " ".join(redact_command_argv(argv))
 
 
 # Substrings used to gate ``_PREFIX_RE`` execution. If none of these appear in

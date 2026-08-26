@@ -690,10 +690,12 @@ def _record_matches_live_gateway_pid(
 
 
 def _build_pid_record() -> dict:
+    from agent.redact import redact_command_argv
+
     return {
         "pid": os.getpid(),
         "kind": _GATEWAY_KIND,
-        "argv": list(sys.argv),
+        "argv": redact_command_argv(sys.argv),
         "start_time": _get_process_start_time(os.getpid()),
         # Scoped credential locks are machine-global rather than
         # HERMES_HOME-local.  Persist the owning gateway's process home so an
@@ -2363,10 +2365,16 @@ def write_planned_stop_marker(target_pid: int) -> bool:
     """
     try:
         target_start_time = _get_process_start_time(target_pid)
+        from agent.redact import redact_command_argv
+
         record = {
             "target_pid": target_pid,
             "target_start_time": target_start_time,
             "stopper_pid": os.getpid(),
+            # Preserve command/flag attribution without persisting sensitive
+            # option values such as the argument to --key.
+            "stopper_argv": " ".join(redact_command_argv(sys.argv))[:500],
+            "stopper_parent_pid": os.getppid(),
             "written_at": _utc_now_iso(),
         }
         _write_json_file(_get_planned_stop_marker_path(), record)

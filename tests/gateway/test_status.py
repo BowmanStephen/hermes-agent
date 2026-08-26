@@ -24,6 +24,20 @@ class TestGatewayPidState:
         assert isinstance(payload["argv"], list)
         assert payload["argv"]
 
+    def test_write_pid_file_redacts_sensitive_argv_values(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(
+            status.sys,
+            "argv",
+            ["hermes", "gateway", "run", "--replace", "--key", "pid-secret"],
+        )
+
+        status.write_pid_file()
+
+        payload = json.loads((tmp_path / "gateway.pid").read_text())
+        assert "pid-secret" not in " ".join(payload["argv"])
+        assert "gateway run --replace" in " ".join(payload["argv"])
+
     def test_write_pid_file_is_atomic_against_concurrent_writers(self, tmp_path, monkeypatch):
         """Regression: two concurrent --replace invocations must not both win.
 
@@ -1098,7 +1112,25 @@ class TestPlannedStopMarker:
         assert payload["target_pid"] == 12345
         assert payload["target_start_time"] == 42
         assert payload["stopper_pid"] == os.getpid()
+        from agent.redact import redact_command_argv
+
+        assert payload["stopper_argv"] == " ".join(redact_command_argv(status.sys.argv))
+        assert payload["stopper_parent_pid"] == os.getppid()
         assert "written_at" in payload
+
+    def test_write_marker_redacts_sensitive_option_values(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 42)
+        monkeypatch.setattr(
+            status.sys,
+            "argv",
+            ["hermes", "gateway", "restart", "--key", "marker-secret"],
+        )
+
+        assert status.write_planned_stop_marker(target_pid=12345) is True
+        payload = json.loads((tmp_path / ".gateway-planned-stop.json").read_text())
+        assert "marker-secret" not in payload["stopper_argv"]
+        assert "gateway restart" in payload["stopper_argv"]
 
 
     def test_consume_returns_true_on_windows_when_start_time_unavailable(

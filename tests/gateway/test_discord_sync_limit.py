@@ -50,7 +50,9 @@ def adapter():
     adapter._client.application_id = "test_app_id"
 
     adapter._sleep_between_command_sync_mutations = AsyncMock()
-    adapter._existing_command_to_payload = MagicMock(side_effect=lambda cmd: {"name": cmd.name})
+    adapter._existing_command_to_payload = MagicMock(
+        side_effect=lambda cmd: {"name": cmd.name, "type": cmd.type}
+    )
     adapter._canonicalize_app_command_payload = MagicMock(side_effect=lambda p: p)
     adapter._patchable_app_command_payload = MagicMock(side_effect=lambda p: p)
 
@@ -80,7 +82,9 @@ async def test_safe_sync_deletes_before_creating():
     adapter._client.http = AsyncMock()
     adapter._client.application_id = "test_app_id"
     adapter._sleep_between_command_sync_mutations = AsyncMock()
-    adapter._existing_command_to_payload = MagicMock(side_effect=lambda cmd: {"name": cmd.name})
+    adapter._existing_command_to_payload = MagicMock(
+        side_effect=lambda cmd: {"name": cmd.name, "type": cmd.type}
+    )
     adapter._canonicalize_app_command_payload = MagicMock(side_effect=lambda p: p)
     adapter._patchable_app_command_payload = MagicMock(side_effect=lambda p: p)
 

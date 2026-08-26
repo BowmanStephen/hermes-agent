@@ -77,6 +77,7 @@ _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.
 
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+_DISCORD_COMMAND_SYNC_SAFE_BULK_THRESHOLD = 12
 # Discord enforces a hard cap of 100 global application (slash) commands per
 # app. Registering more makes the ENTIRE sync fail with error 30032
 # ("Maximum number of application commands reached"), which silently breaks
@@ -3270,33 +3271,21 @@ class DiscordAdapter(BasePlatformAdapter):
         created = 0
         deleted = 0
         http = self._client.http
-        mutation_count = 0
+        operations: List[tuple] = []
 
-        async def mutate(call, *args):
-            nonlocal mutation_count
-            if mutation_count:
-                await self._sleep_between_command_sync_mutations()
-            result = await call(*args)
-            mutation_count += 1
-            return result
-
-        # Delete obsolete commands FIRST to stay under Discord's 100-command
-        # limit. Discord rejects an upsert that would push the live total over
-        # 100 (error 30032), which silently breaks ALL slash commands. If a new
-        # command is created before the obsolete ones are removed, an app that
-        # is already at the cap momentarily exceeds it and the whole sync fails.
-        # Removing the no-longer-desired commands up front guarantees the live
-        # total never rises above the cap mid-sync.
+        # Plan the complete diff before writing. Large command-set migrations
+        # otherwise consume one Discord command-management request every 4.5
+        # seconds and still exhaust the application bucket partway through.
         obsolete_keys = set(existing_by_key.keys()) - set(desired_by_key.keys())
         for key in obsolete_keys:
-            current = existing_by_key.pop(key)
-            await mutate(http.delete_global_command, app_id, current.id)
+            current = existing_by_key[key]
+            operations.append((http.delete_global_command, app_id, current.id))
             deleted += 1
 
         for key, desired in desired_by_key.items():
-            current = existing_by_key.pop(key, None)
+            current = existing_by_key.get(key)
             if current is None:
-                await mutate(http.upsert_global_command, app_id, desired)
+                operations.append((http.upsert_global_command, app_id, desired))
                 created += 1
                 continue
 
@@ -3308,13 +3297,26 @@ class DiscordAdapter(BasePlatformAdapter):
                 continue
 
             if self._patchable_app_command_payload(current_existing_payload) == self._patchable_app_command_payload(desired):
-                await mutate(http.delete_global_command, app_id, current.id)
-                await mutate(http.upsert_global_command, app_id, desired)
+                operations.append((http.delete_global_command, app_id, current.id))
+                operations.append((http.upsert_global_command, app_id, desired))
                 recreated += 1
                 continue
 
-            await mutate(http.edit_global_command, app_id, current.id, desired)
+            operations.append((http.edit_global_command, app_id, current.id, desired))
             updated += 1
+
+        if len(operations) > _DISCORD_COMMAND_SYNC_SAFE_BULK_THRESHOLD:
+            # Discord's bulk overwrite is one atomic command-management
+            # request. Registration already caps the desired tree at 100, so
+            # this path cannot exceed Discord's global-command hard limit.
+            await tree.sync()
+        else:
+            # Delete obsolete commands first. This keeps the live count below
+            # Discord's 100-command cap when a small diff also creates entries.
+            for index, (call, *args) in enumerate(operations):
+                if index:
+                    await self._sleep_between_command_sync_mutations()
+                await call(*args)
 
         return {
             "total": len(desired_payloads),

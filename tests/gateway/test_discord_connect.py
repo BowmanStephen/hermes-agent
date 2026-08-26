@@ -440,6 +440,59 @@ async def test_safe_sync_slash_commands_only_mutates_diffs():
 
 
 @pytest.mark.asyncio
+async def test_safe_sync_uses_one_bulk_request_for_large_diff():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    class _DesiredCommand:
+        def __init__(self, index):
+            self.index = index
+
+        def to_dict(self, tree):
+            return {
+                "name": f"command-{self.index}",
+                "description": f"Command {self.index}",
+                "type": 1,
+                "options": [],
+            }
+
+    desired = [
+        _DesiredCommand(index)
+        for index in range(discord_platform._DISCORD_COMMAND_SYNC_SAFE_BULK_THRESHOLD + 1)
+    ]
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: desired,
+        fetch_commands=AsyncMock(return_value=[]),
+        sync=AsyncMock(return_value=[]),
+    )
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(),
+        edit_global_command=AsyncMock(),
+        delete_global_command=AsyncMock(),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands()
+
+    assert summary == {
+        "total": len(desired),
+        "unchanged": 0,
+        "updated": 0,
+        "recreated": 0,
+        "created": len(desired),
+        "deleted": 0,
+    }
+    fake_tree.sync.assert_awaited_once_with()
+    fake_http.upsert_global_command.assert_not_awaited()
+    fake_http.edit_global_command.assert_not_awaited()
+    fake_http.delete_global_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_connect_initialization_retries_fingerprint_after_timeout(tmp_path, monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
@@ -706,4 +759,3 @@ class TestPrivilegedIntentsRequiredFatal:
         assert "Message Content Intent" in (adapter.fatal_error_message or "")
         assert "discord.com/developers/applications" in (adapter.fatal_error_message or "")
         assert adapter._bot_task is None
-

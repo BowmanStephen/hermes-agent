@@ -4495,10 +4495,13 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       finish, transient infra error clears).
 
     The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
+    ``"blocked"`` / ``"unblocked"`` event for the task.  Initial human-ops
+    cards use their ``"created"`` event's ``status`` payload as the same
+    durable signal, since they intentionally skip a separate blocked
+    transition.  If the most recent signal is ``"blocked"`` (or a created
+    event says ``status='blocked'`` and no ``"unblocked"`` event has fired
+    since), the task is sticky and ``recompute_ready`` must *not* auto-promote
+    it.
 
     Returns ``False`` when there is no such event at all (e.g. the task
     was set to ``status='blocked'`` by the circuit breaker or by direct
@@ -4506,12 +4509,22 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     for that path.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('created', 'blocked', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row:
+        return False
+    if row["kind"] == "blocked":
+        return True
+    if row["kind"] != "created":
+        return False
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    return isinstance(payload, dict) and payload.get("status") == "blocked"
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:

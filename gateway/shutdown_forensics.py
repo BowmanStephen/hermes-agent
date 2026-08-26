@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -209,8 +210,8 @@ def spawn_async_diagnostic(
 
     Runs as a detached subprocess so it can't block the asyncio event loop
     or compete with platform teardown.  The subprocess uses its own
-    ``timeout`` so a wedged ``ps`` still self-cleans within
-    ``timeout_seconds``.
+    ``timeout`` (or a bundled Python fallback on macOS) so a wedged ``ps``
+    still self-cleans within ``timeout_seconds``.
 
     Returns the subprocess PID on success, ``None`` on failure.  Never
     raises.
@@ -245,6 +246,41 @@ def spawn_async_diagnostic(
         "echo '=== end ==='"
     )
 
+    timeout_command = shutil.which("timeout") or shutil.which("gtimeout")
+    if timeout_command:
+        diagnostic_argv = [
+            timeout_command,
+            f"{timeout_seconds:.0f}",
+            "bash",
+            "-c",
+            script,
+        ]
+    else:
+        # macOS ships bash but not GNU ``timeout``. Keep the diagnostic
+        # bounded without adding a runtime dependency: a short-lived Python
+        # supervisor runs the shell in its own process group and kills that
+        # group if it exceeds the requested deadline.
+        timeout_helper = (
+            "import os, signal, subprocess, sys\n"
+            "proc = subprocess.Popen(['bash', '-c', sys.argv[1]], "
+            "start_new_session=True)\n"
+            "try:\n"
+            "    proc.wait(timeout=float(sys.argv[2]))\n"
+            "except subprocess.TimeoutExpired:\n"
+            "    try:\n"
+            "        os.killpg(proc.pid, signal.SIGKILL)\n"
+            "    except (ProcessLookupError, OSError):\n"
+            "        pass\n"
+            "    proc.wait()\n"
+        )
+        diagnostic_argv = [
+            sys.executable,
+            "-c",
+            timeout_helper,
+            script,
+            str(max(0.0, timeout_seconds)),
+        ]
+
     try:
         # Open the log file in append mode and let the subprocess inherit.
         # We use os.O_APPEND so concurrent diagnostics from rapid signals
@@ -260,7 +296,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            diagnostic_argv,
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

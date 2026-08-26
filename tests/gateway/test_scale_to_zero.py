@@ -109,6 +109,7 @@ def test_idle_exactly_at_threshold():
 
 import os
 import socket as _socket
+import tempfile
 import threading
 
 
@@ -122,9 +123,13 @@ from gateway.scale_to_zero import (  # noqa: E402 - grouped with their section
 _FLY_ENV = {FLY_APP_NAME_ENV: "hermes-agent-stg-test", FLY_MACHINE_ID_ENV: "d891234f"}
 
 
-def _fake_flaps(tmp_path, status_line, capture):
+def _fake_flaps(status_line, capture):
     """One-shot unix-socket HTTP server standing in for flaps."""
-    sock_path = str(tmp_path / "fly-api.sock")
+    # macOS limits AF_UNIX paths to 104 bytes.  pytest's tmp_path can be deep
+    # enough to exceed that limit, so keep this test-only socket under /tmp;
+    # production continues to use the fixed /.fly/api path.
+    sock_dir = tempfile.mkdtemp(prefix="hermes-flaps-", dir="/tmp")
+    sock_path = os.path.join(sock_dir, "api.sock")
     server = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     server.bind(sock_path)
     server.listen(1)
@@ -144,15 +149,17 @@ def _fake_flaps(tmp_path, status_line, capture):
                 f"HTTP/1.1 {status_line}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}".encode()
             )
         server.close()
+        os.unlink(sock_path)
+        os.rmdir(sock_dir)
 
     t = threading.Thread(target=serve, daemon=True)
     t.start()
     return sock_path, t
 
 
-def test_suspend_self_posts_suspend_for_this_machine(tmp_path):
+def test_suspend_self_posts_suspend_for_this_machine():
     captured: list[bytes] = []
-    sock_path, t = _fake_flaps(tmp_path, "200 OK", captured)
+    sock_path, t = _fake_flaps("200 OK", captured)
     assert suspend_self(_FLY_ENV, socket_path=sock_path) is True
     t.join(timeout=5)
     request = captured[0].decode()
@@ -164,9 +171,9 @@ def test_suspend_self_posts_suspend_for_this_machine(tmp_path):
     assert "Host: flaps\r\n" in request
 
 
-def test_suspend_self_non_2xx_is_false_not_raise(tmp_path):
+def test_suspend_self_non_2xx_is_false_not_raise():
     captured: list[bytes] = []
-    sock_path, t = _fake_flaps(tmp_path, "412 Precondition Failed", captured)
+    sock_path, t = _fake_flaps("412 Precondition Failed", captured)
     assert suspend_self(_FLY_ENV, socket_path=sock_path) is False
     t.join(timeout=5)
 

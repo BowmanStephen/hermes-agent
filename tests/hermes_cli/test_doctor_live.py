@@ -145,6 +145,30 @@ class TestConfiguredOnlySelection:
         assert len(results) == 2
         assert all(r.status == "pass" for r in results)
 
+    def test_disabled_mcp_server_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            doctor_live,
+            "_load_config",
+            lambda: {"mcp_servers": {
+                "disabled": {"url": "https://x", "enabled": False},
+                "enabled": {"url": "https://y"},
+            }},
+        )
+        probed = []
+        monkeypatch.setattr(
+            doctor_live,
+            "_probe_mcp_server",
+            lambda name, cfg, timeout: probed.append(name) or [("t", "d")],
+        )
+
+        results = {
+            r.name: r for r in run_live_checks([]) if r.name.startswith("MCP")
+        }
+
+        assert probed == ["enabled"]
+        assert results["MCP: disabled"].status == "skip"
+        assert results["MCP: enabled"].status == "pass"
+
     def test_tts_local_provider_skipped(self, monkeypatch):
         monkeypatch.setattr(
             doctor_live, "_load_config",
@@ -188,6 +212,51 @@ class TestConfiguredOnlySelection:
             lambda timeout: (True, "about:blank ok"))
         results = {r.name: r for r in run_live_checks([])}
         assert results["Browser"].status == "pass"
+
+
+class TestBrowserProbe:
+    def test_uses_agent_browser_cli_and_cleans_private_session(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "tools.browser_tool._find_agent_browser",
+            lambda **_kwargs: "/usr/local/bin/agent-browser",
+        )
+
+        def _run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(doctor_live.subprocess, "run", _run)
+
+        ok, detail = doctor_live._launch_browser_probe(3.0)
+
+        assert ok is True
+        assert detail == "launched + about:blank + closed"
+        assert calls[0][0][0] == "/usr/local/bin/agent-browser"
+        assert calls[0][0][-2:] == ["open", "about:blank"]
+        assert calls[1][0][-1:] == ["close"]
+        assert calls[0][0][calls[0][0].index("--session") + 1].startswith(
+            "hermes-doctor-"
+        )
+
+    def test_cli_failure_is_reported_and_cleanup_still_runs(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "tools.browser_tool._find_agent_browser",
+            lambda **_kwargs: "agent-browser",
+        )
+
+        def _run(cmd, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=17)
+
+        monkeypatch.setattr(doctor_live.subprocess, "run", _run)
+
+        ok, detail = doctor_live._launch_browser_probe(3.0)
+
+        assert ok is False
+        assert detail == "agent-browser exited 17"
+        assert len(calls) == 2
 
 
 class TestBrowserAvailableNpxRung:

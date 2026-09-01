@@ -19,6 +19,7 @@ Design invariants:
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -113,23 +114,63 @@ def _browser_available() -> bool:
 def _launch_browser_probe(timeout: float) -> tuple:
     """Launch a browser, open about:blank, close. Returns (ok, detail).
 
-    Uses Playwright directly (what agent-browser drives underneath) so the
-    probe owns the full lifecycle and always cleans up.
+    Uses the same agent-browser CLI as Hermes' browser tool.  Do not import
+    Python Playwright here: it is not a Hermes dependency, and installations
+    using the supported agent-browser backend would otherwise be reported as
+    broken even when the real browser path works.
     """
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return (False, "playwright not installed")
+        from tools.browser_tool import _find_agent_browser
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True,
-                                    timeout=timeout * 1000)
+        resolved = _find_agent_browser(validate=False)
+        # ``_find_agent_browser`` returns either an executable path or its
+        # explicit lazy-resolution sentinel.  Keep paths as one argv item so
+        # an installation under a directory containing spaces still works.
+        browser_cmd = (
+            ["npx", "agent-browser"]
+            if resolved == "npx agent-browser"
+            else [resolved]
+        )
+    except Exception as exc:
+        return (False, f"agent-browser unavailable ({exc.__class__.__name__})")
+
+    if not browser_cmd:
+        return (False, "agent-browser command is empty")
+
+    # A private session prevents this diagnostic from attaching to or closing
+    # a user's default browser session.  The PID is unique for the lifetime of
+    # the doctor process and stable enough for cleanup in the finally block.
+    session = f"hermes-doctor-{os.getpid()}"
+    open_cmd = [*browser_cmd, "--session", session, "open", "about:blank"]
+    close_cmd = [*browser_cmd, "--session", session, "close"]
+    try:
+        completed = subprocess.run(
+            open_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if completed.returncode != 0:
+            return (False, f"agent-browser exited {completed.returncode}")
+        return (True, "launched + about:blank + closed")
+    except subprocess.TimeoutExpired:
+        return (False, "agent-browser timed out")
+    except OSError as exc:
+        return (False, f"agent-browser launch failed ({exc.__class__.__name__})")
+    finally:
+        # Best-effort cleanup.  Never replace the useful open error with a
+        # cleanup failure, and keep cleanup bounded independently.
         try:
-            page = browser.new_page()
-            page.goto("about:blank", timeout=timeout * 1000)
-        finally:
-            browser.close()
-    return (True, "launched + about:blank + closed")
+            subprocess.run(
+                close_cmd,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=min(timeout, 5.0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def _probe_mcp_server(name: str, config: dict, timeout: float):
@@ -300,6 +341,8 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
                 if not isinstance(e, dict):
                     return ProbeResult(f"MCP: {n}", "skip",
                                        "(malformed config entry)")
+                if e.get("enabled") is False:
+                    return ProbeResult(f"MCP: {n}", "skip", "(disabled)")
                 tools = _probe_mcp_server(n, e, timeout)
                 return ProbeResult(f"MCP: {n}", "pass",
                                    f"({len(tools)} tool(s))")

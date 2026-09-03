@@ -384,6 +384,7 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_pid_cgroup_path", return_value=None), \
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes") as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
@@ -409,6 +410,7 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
@@ -437,6 +439,7 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes") as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
@@ -464,6 +467,7 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
@@ -502,6 +506,121 @@ class TestManualBackendRespawn:
         assert failed == [["hermes", "serve"]]
         out = capsys.readouterr().out
         assert "✗ failed to restart" in out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="launchd is POSIX-only")
+class TestLaunchdHandback:
+    """macOS launchd-managed dashboards are kickstarted in place instead of
+    respawned detached — the detached twin grabbed the port and launchd's
+    KeepAlive copy then looped on EADDRINUSE (2,359 errors, Aug 2026)."""
+
+    def _kill_update_path(self, label, kick_exit=0):
+        """Run the update-path kill with *label* as the detected launchd job.
+
+        Returns (result, subprocess calls, respawn mock)."""
+        live = sys.modules["hermes_cli.main"]
+        argv = ["hermes", "dashboard", "--port", "9119"]
+        calls: list[list[str]] = []
+        respawn_mock = MagicMock(return_value=[])
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, kick_exit, "", "")
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+
+        with patch.object(live, "_restart_managed_dashboard_service", return_value=False), \
+             patch.object(live, "_find_stale_dashboard_pids", return_value=[4242]), \
+             patch.object(live, "_get_pid_cgroup_path", return_value=None), \
+             patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
+             patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
+             patch.object(live, "_respawn_dashboard_processes", respawn_mock) as respawn, \
+             patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=label), \
+             patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs.subprocess.run", side_effect=fake_run), \
+             patch("gateway.status._pid_exists", return_value=False), \
+             patch("os.getuid", return_value=501), \
+             patch("sys.platform", "darwin"), \
+             patch("os.kill", side_effect=fake_kill), \
+             patch("time.sleep"):
+            result = _kill_stale_dashboard_processes(restart_managed=True)
+        return result, calls, respawn
+
+    def test_launchd_pid_kickstarted_not_respawned(self, capsys):
+        result, calls, respawn = self._kill_update_path("ai.hermes.dashboard")
+        respawn.assert_not_called()
+        assert calls == [["launchctl", "kickstart", "-k", "gui/501/ai.hermes.dashboard"]]
+        assert result["killed"] == [4242]
+        assert result["unrecovered"] == []
+        assert "kickstarted launchd job ai.hermes.dashboard" in capsys.readouterr().out
+
+    def test_kickstart_failure_marks_pid_unrecovered(self, capsys):
+        result, calls, respawn = self._kill_update_path(
+            "ai.hermes.dashboard", kick_exit=1)
+        respawn.assert_not_called()
+        assert calls == [["launchctl", "kickstart", "-k", "gui/501/ai.hermes.dashboard"]]
+        assert result["unrecovered"] == [4242]
+        assert "launchctl kickstart returned non-zero" in capsys.readouterr().out
+
+    def test_unmanaged_pid_still_respawns_detached(self, capsys):
+        result, calls, respawn = self._kill_update_path(None)
+        respawn.assert_called_once_with(
+            [["hermes", "dashboard", "--port", "9119"]])
+        assert calls == []
+        assert result["unrecovered"] == []
+
+    def test_label_probe_parses_xpc_value(self):
+        """XPC_SERVICE_NAME parsing: ':' segments and '/' path prefixes are
+        normalized away, leaving the bare job label."""
+        from hermes_cli.dashboard_procs import _launchd_label_for_pid
+
+        def fake_run(cmd, *a, **kw):
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                " 677 ? Ss 0:01 XPC_SERVICE_NAME=gui/501/ai.hermes.dashboard "
+                "PATH=/usr/bin:/bin hermes dashboard\n",
+                "")
+
+        with patch("sys.platform", "darwin"), \
+             patch("hermes_cli.dashboard_procs.subprocess.run", side_effect=fake_run):
+            assert _launchd_label_for_pid(677) == "ai.hermes.dashboard"
+
+    def test_label_probe_rejects_shell_sentinel(self):
+        """XPC_SERVICE_NAME=0 is the interactive-shell sentinel: readable env
+        that says the process is not launchd-managed."""
+        from hermes_cli.dashboard_procs import _launchd_label_for_pid
+
+        def fake_run(cmd, *a, **kw):
+            return subprocess.CompletedProcess(
+                cmd, 0, " 677 ? Ss 0:01 XPC_SERVICE_NAME=0 hermes dashboard\n", "")
+
+        with patch("sys.platform", "darwin"), \
+             patch("hermes_cli.dashboard_procs.subprocess.run", side_effect=fake_run):
+            assert _launchd_label_for_pid(677) is None
+
+    def test_label_probe_falls_back_to_domain_print(self):
+        """macOS 26 dropped ``ps -E`` and suppresses ``ps e`` env disclosure —
+        the pid must be matched against ``launchctl print gui/<uid>``."""
+        from hermes_cli.dashboard_procs import _launchd_label_for_pid
+
+        def fake_run(cmd, *a, **kw):
+            if cmd[0] == "ps":
+                return subprocess.CompletedProcess(
+                    cmd, 1, "", "ps: unsupported option '-E'")
+            out = (
+                "\t\t   610   -  \tcom.apple.tccd\n"
+                "\t\t   677   -  \tai.hermes.dashboard\n"
+                "\t\t     0   -  \tcom.apple.cvmsCompAgent_arm64\n"
+            )
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+
+        with patch("sys.platform", "darwin"), \
+             patch("hermes_cli.dashboard_procs.subprocess.run", side_effect=fake_run), \
+             patch("os.getuid", return_value=501):
+            assert _launchd_label_for_pid(677) == "ai.hermes.dashboard"
+            assert _launchd_label_for_pid(999) is None
 
 
 class TestFilterDashboardRespawnCandidates:

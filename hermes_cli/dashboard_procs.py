@@ -166,6 +166,87 @@ def _hermes_home_for_pid(pid: int) -> str | None:
     return None
 
 
+def _launchd_label_for_pid(pid: int) -> str | None:
+    """Best-effort launchd job label for *pid* (macOS only, else None).
+
+    launchd stamps ``XPC_SERVICE_NAME=<label>`` on every process it spawns,
+    while interactive shells inherit the sentinel ``"0"`` (same probe as the
+    gateway handback, #86893).  Recent macOS builds dropped ``ps -E`` and
+    suppress ``ps e`` environment disclosure, so when the env is unreadable
+    we fall back to the pid→label table in ``launchctl print gui/<uid>``.
+    """
+    if sys.platform != "darwin":
+        return None
+    for argv in (["ps", "-EWW", "-p", str(pid)], ["ps", "eww", str(pid)]):
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        if result.returncode != 0:
+            continue
+        stdout = result.stdout or ""
+        for token in stdout.split():
+            if token.startswith("XPC_SERVICE_NAME="):
+                raw = token.split("=", 1)[1]
+                if raw == "0":
+                    # Interactive-shell sentinel: the env is readable and
+                    # says this process is not launchd-managed.
+                    return None
+                # Normalize: keep the segment before any ":" and strip any
+                # "/" path prefix so kickstart gets the bare job label
+                # ("gui/501/ai.hermes.dashboard" → "ai.hermes.dashboard").
+                label = raw.split(":", 1)[0]
+                if "/" in label:
+                    label = label.rsplit("/", 1)[-1]
+                return label or None
+        if "=" in stdout:
+            # Environment fully disclosed and XPC_SERVICE_NAME is absent —
+            # genuinely not launchd-managed.
+            return None
+    # Env unreadable (macOS 26+): match the pid against the user's launchd
+    # domain listing, whose job table reads "<pid> <last-status> <label>".
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}"],
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            if int(parts[0]) != pid:
+                continue
+        except ValueError:
+            continue
+        if parts[1] == "-":
+            return parts[2]
+    return None
+
+
+def _kickstart_launchd_label(label: str) -> bool:
+    """Restart a launchd job in place (``launchctl kickstart -k``, macOS)."""
+    try:
+        result = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=30,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _is_ephemeral_port_zero_backend(argv: list[str]) -> bool:
     """True for Desktop-style ``serve|dashboard --port 0`` backends (#78821).
 
@@ -321,6 +402,12 @@ def _kill_stale_dashboard_processes(
     restarted after the kill, because systemd treats our SIGTERM as a clean
     stop and ``Restart=on-failure`` would never fire (#68934).
 
+    macOS: a PID supervised by a launchd LaunchAgent (``XPC_SERVICE_NAME``
+    in its environment, else a job in the user's ``gui`` launchd domain) is
+    kickstarted in place via ``launchctl kickstart -k gui/<uid>/<label>``
+    instead of being respawned detached — KeepAlive would otherwise relaunch
+    the plist copy into a port the detached twin already holds.
+
     *already_restarted_units* names units (no ``.service`` suffix) the
     caller already restarted directly — e.g. ``hermes update``'s systemd
     fleet-restart loop, which restarts ``hermes-serve*`` units before this
@@ -365,6 +452,7 @@ def _kill_stale_dashboard_processes(
     pid_service: dict[int, str | None] = {}
     pid_cmdline: dict[int, list[str]] = {}
     pid_home: dict[int, str | None] = {}
+    pid_launchd: dict[int, str | None] = {}
     if restart_managed and sys.platform != "win32":
         for pid in pids:
             cg_path = _m()._get_pid_cgroup_path(pid)
@@ -379,6 +467,10 @@ def _kill_stale_dashboard_processes(
                 if cmdline:
                     pid_cmdline[pid] = cmdline
                     pid_home[pid] = _hermes_home_for_pid(pid)
+                # Snapshot any launchd job label before the kill too — the
+                # pid's env / launchd domain entry must be read while the
+                # process is still alive (macOS handback below).
+                pid_launchd[pid] = _launchd_label_for_pid(pid)
 
         if already_restarted_units:
             # Already handled directly by the caller (e.g. hermes update's
@@ -486,6 +578,25 @@ def _kill_stale_dashboard_processes(
                     restarted_services.append(svc_name)
                 else:
                     failed_restarts.append((svc_name, "systemctl restart returned non-zero"))
+                    unrecovered.append(pid)
+            elif pid_launchd.get(pid):
+                # macOS launchd handback: without it, `hermes update`
+                # SIGTERMed the launchd-managed dashboard and respawned a
+                # detached twin; launchd's KeepAlive then relaunched the
+                # plist copy into a port the twin already held — a
+                # permanent EADDRINUSE loop (2,359 "[Errno 48] address
+                # already in use" errors, ~19.7h, Aug 2026).  Kickstart the
+                # owning job so launchd restarts it in place instead.
+                label = pid_launchd[pid]
+                if label in seen_services:
+                    continue
+                seen_services.add(label)
+                if _kickstart_launchd_label(label):
+                    print(f"    ✓ kickstarted launchd job {label}")
+                else:
+                    failed_restarts.append(
+                        (label, "launchctl kickstart returned non-zero")
+                    )
                     unrecovered.append(pid)
             elif pid in pid_cmdline:
                 respawn_candidates.append(

@@ -53,6 +53,23 @@ afterEach(() => {
   delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
 })
 
+/** Stub the standalone door with one plugin folder containing plugin.js. */
+const standaloneRootWith = (name: string) => {
+  const folder = `/local/.hermes/desktop-plugins/${name}`
+
+  readDir.mockImplementation(async dir => {
+    if (dir === '/local/.hermes/desktop-plugins') {
+      return { entries: [{ isDirectory: true, name, path: folder }] }
+    }
+
+    if (dir === folder) {
+      return { entries: [{ isDirectory: false, name: 'plugin.js', path: `${folder}/plugin.js` }] }
+    }
+
+    return { entries: [] }
+  })
+}
+
 describe('scanDiskPlugins (#66899)', () => {
   it('scans the Electron-resolved local roots, never the backend hermes_home', async () => {
     desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
@@ -231,9 +248,7 @@ describe('scanDiskPlugins (#66899)', () => {
   it('waits for a hot-edited entry file to settle before importing it', async () => {
     desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
     agentPluginsRoot.mockResolvedValue('')
-    readDir.mockResolvedValue({
-      entries: [{ isDirectory: true, name: 'race', path: '/local/.hermes/desktop-plugins/race' }]
-    })
+    standaloneRootWith('race')
 
     const register = vi.fn()
     ;(globalThis as unknown as { __raceRegister: unknown }).__raceRegister = register
@@ -293,9 +308,7 @@ describe('scanDiskPlugins (#66899)', () => {
   it('reports a plugin that never settles after the final import attempt', async () => {
     desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
     agentPluginsRoot.mockResolvedValue('')
-    readDir.mockResolvedValue({
-      entries: [{ isDirectory: true, name: 'broken', path: '/local/.hermes/desktop-plugins/broken' }]
-    })
+    standaloneRootWith('broken')
 
     const partial = '<<<<<<< HEAD\nexport default { id: "broken", register() {} }'
     readFileText.mockResolvedValue({ text: partial })
@@ -381,21 +394,6 @@ describe('plugin source reads (512 KiB preview-cap bug)', () => {
 
   /** Two-level standalone-root listing the metadata-walk probe needs:
    *  the root lists the package folder, the folder lists plugin.js. */
-  const standaloneRootWith = (name: string) => {
-    const folder = `/local/.hermes/desktop-plugins/${name}`
-
-    readDir.mockImplementation(async dir => {
-      if (dir === '/local/.hermes/desktop-plugins') {
-        return { entries: [{ isDirectory: true, name, path: folder }] }
-      }
-
-      if (dir === folder) {
-        return { entries: [{ isDirectory: false, name: 'plugin.js', path: `${folder}/plugin.js` }] }
-      }
-
-      return { entries: [] }
-    })
-  }
 
   it('loads the full source via readPluginSource when the shell offers it', async () => {
     ;(window.hermesDesktop as unknown as { readPluginSource: unknown }).readPluginSource = readPluginSource

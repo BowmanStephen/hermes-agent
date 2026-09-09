@@ -391,7 +391,7 @@ class TestSupervisedBackendRestart:
                 raise ProcessLookupError
 
         with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids", return_value=[4321]), \
+             patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[4321]), \
              patch.object(main_dashboard, "_get_pid_cgroup_path",
                           return_value="/system.slice/hermes-serve.service"), \
              patch.object(main_dashboard, "_get_systemd_service_for_pid",
@@ -417,7 +417,7 @@ class TestSupervisedBackendRestart:
         live = self._live()
 
         with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids", return_value=[4321]), \
+             patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[4321]), \
              patch.object(main_dashboard, "_get_pid_cgroup_path",
                           return_value="/system.slice/hermes-serve.service"), \
              patch.object(main_dashboard, "_get_systemd_service_for_pid",
@@ -451,12 +451,12 @@ class TestManualBackendRespawn:
                 raise ProcessLookupError
 
         with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids", return_value=[5555]), \
+             patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[5555]), \
              patch.object(main_dashboard, "_get_pid_cgroup_path", return_value=None), \
              patch.object(main_dashboard, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(main_dashboard, "_dashboard_cmdline_for_pid", return_value=None), \
              patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
-             patch.object(live, "_respawn_dashboard_processes") as respawn, \
+             patch.object(main_dashboard, "_respawn_dashboard_processes") as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
             _kill_stale_dashboard_processes(restart_managed=True)
@@ -476,13 +476,13 @@ class TestManualBackendRespawn:
                 raise ProcessLookupError
 
         with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids", return_value=[6001]), \
+             patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[6001]), \
              patch.object(main_dashboard, "_get_pid_cgroup_path", return_value=None), \
              patch.object(main_dashboard, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(main_dashboard, "_dashboard_cmdline_for_pid", return_value=argv), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
              patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
-             patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
+             patch.object(main_dashboard, "_respawn_dashboard_processes", return_value=[]) as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
             _kill_stale_dashboard_processes(restart_managed=True)
@@ -504,14 +504,14 @@ class TestManualBackendRespawn:
                 raise ProcessLookupError
 
         with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids",
+             patch.object(main_dashboard, "_find_stale_dashboard_pids",
                           return_value=[7001, 7002, 7003]), \
              patch.object(main_dashboard, "_get_pid_cgroup_path", return_value=None), \
              patch.object(main_dashboard, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(main_dashboard, "_dashboard_cmdline_for_pid", return_value=argv), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
              patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
-             patch.object(live, "_respawn_dashboard_processes") as respawn, \
+             patch.object(main_dashboard, "_respawn_dashboard_processes") as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
             result = _kill_stale_dashboard_processes(restart_managed=True)
@@ -533,13 +533,13 @@ class TestManualBackendRespawn:
                 raise ProcessLookupError
 
         with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids", return_value=[8001]), \
+             patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[8001]), \
              patch.object(main_dashboard, "_get_pid_cgroup_path", return_value=None), \
              patch.object(main_dashboard, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(main_dashboard, "_dashboard_cmdline_for_pid", return_value=argv), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
              patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=None), \
-             patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
+             patch.object(main_dashboard, "_respawn_dashboard_processes", return_value=[]) as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
             _kill_stale_dashboard_processes(restart_managed=True)
@@ -602,12 +602,12 @@ class TestLaunchdHandback:
             if sig == 0:
                 raise ProcessLookupError
 
-        with patch.object(live, "_restart_managed_dashboard_service", return_value=False), \
-             patch.object(live, "_find_stale_dashboard_pids", return_value=[4242]), \
-             patch.object(live, "_get_pid_cgroup_path", return_value=None), \
-             patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
-             patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
-             patch.object(live, "_respawn_dashboard_processes", respawn_mock) as respawn, \
+        with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
+             patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[4242]), \
+             patch.object(main_dashboard, "_get_pid_cgroup_path", return_value=None), \
+             patch.object(main_dashboard, "_get_systemd_service_for_pid", return_value=None), \
+             patch.object(main_dashboard, "_dashboard_cmdline_for_pid", return_value=argv), \
+             patch.object(main_dashboard, "_respawn_dashboard_processes", respawn_mock) as respawn, \
              patch("hermes_cli.dashboard_procs._launchd_label_for_pid", return_value=label), \
              patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
              patch("hermes_cli.dashboard_procs.subprocess.run", side_effect=fake_run), \

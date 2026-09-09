@@ -177,14 +177,17 @@ class TestGoalManager:
         ):
             decision = mgr.evaluate_after_turn("I need user input before continuing")
 
-        assert decision["status"] == "blocked"
+        # Upstream 0.21.1 models a blocked judge verdict as a paused goal
+        # (resumable via /goal resume) rather than a distinct status.
+        assert decision["status"] in ("blocked", "paused")
         assert decision["verdict"] == "blocked"
         assert decision["should_continue"] is False
         assert decision["continuation_prompt"] is None
-        assert "blocked" in decision["message"].lower()
+        msg = decision["message"].lower()
+        assert "blocked" in msg or "paused" in msg or "unachievable" in msg
         assert "needs user input" in decision["message"]
         assert mgr.state is not None
-        assert mgr.state.status == "blocked"
+        assert mgr.state.status in ("blocked", "paused")
         assert mgr.state.last_verdict == "blocked"
         assert mgr.next_continuation_prompt() is None
 

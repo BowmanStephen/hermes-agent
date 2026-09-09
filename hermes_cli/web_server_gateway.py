@@ -363,8 +363,8 @@ def _profile_action_environment(
         action_env = dict(os.environ)
     else:
         from hermes_cli.env_loader import (
+            _PROFILE_MANAGED_ENV_KEYS,
             _env_keys_defined_in_dotenv,
-            _known_hermes_env_keys,
             get_secret_source_values,
         )
         from hermes_cli.web_server_profiles import _resolve_profile_dir
@@ -373,7 +373,7 @@ def _profile_action_environment(
         target_home = _resolve_profile_dir(profile)
         action_env = build_subprocess_env(base=os.environ, scrub_secrets=True)
 
-        profile_keys = _known_hermes_env_keys()
+        profile_keys = set(_PROFILE_MANAGED_ENV_KEYS)
         try:
             from hermes_constants import get_default_hermes_root, get_hermes_home as _get_hermes_home
 

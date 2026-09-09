@@ -1709,8 +1709,8 @@ def test_crash_records_the_reason_from_the_worker_log(kanban_home, monkeypatch):
             "Error: Unknown skill(s): humanizer\n"
         )
 
-        _kb._record_worker_exit(70123, _exited_status(1))
-        assert tid in kb.detect_crashed_workers(conn)
+        kbd._record_worker_exit(70123, _exited_status(1))
+        assert tid in kbd.detect_crashed_workers(conn)
 
         task = kb.get_task(conn, tid)
         assert "Unknown skill(s): humanizer" in (task.last_failure_error or ""), (
@@ -1739,8 +1739,8 @@ def test_crash_without_a_readable_log_still_records_the_exit(
         conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (70124, tid))
         conn.commit()
 
-        _kb._record_worker_exit(70124, _exited_status(1))
-        assert tid in kb.detect_crashed_workers(conn)
+        kbd._record_worker_exit(70124, _exited_status(1))
+        assert tid in kbd.detect_crashed_workers(conn)
 
         # The exact exit_kind depends on the process-global exit registry,
         # so assert the stable property: the crash is still accounted with a

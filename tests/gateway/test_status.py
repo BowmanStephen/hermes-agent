@@ -408,6 +408,7 @@ class TestGatewayRuntimeStatus:
             ), cmdline
 
 
+    @pytest.mark.spawns_gateway_lookalike
     def test_runtime_status_running_pid_real_child_process(self, tmp_path):
         """End-to-end regression: a real live child whose argv carries
         ``hermes_cli.main gateway run -p scoreboard`` must be accepted for the

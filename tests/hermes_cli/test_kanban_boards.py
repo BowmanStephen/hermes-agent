@@ -119,7 +119,7 @@ class TestPathResolution:
                 self.pid = 4242
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
-        monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+        monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
         monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "fleet" / "kanban.db"))
         monkeypatch.setenv(
             "HERMES_KANBAN_WORKSPACES_ROOT",
@@ -147,7 +147,7 @@ class TestPathResolution:
         workspace = tmp_path / "worker-workspace"
         workspace.mkdir()
 
-        kb._default_spawn(task, str(workspace), board="worker-plumbing-smoke")
+        kbd._default_spawn(task, str(workspace), board="worker-plumbing-smoke")
 
         env = captured["env"]
         board_root = fresh_home / "kanban" / "boards" / "worker-plumbing-smoke"

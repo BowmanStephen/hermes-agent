@@ -1209,10 +1209,13 @@ class SessionDB(
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
         "api_call_count",
     )
-    _TOKEN_DELTA_COST_FIELDS = ("estimated_cost_usd", "actual_cost_usd")
+    # api_latency_ms is additive across coalesced deltas (task telemetry).
+    _TOKEN_DELTA_COST_FIELDS = ("estimated_cost_usd", "actual_cost_usd", "api_latency_ms")
+    # task_id/turn_id are part of the route key so deltas from different turns
+    # never merge into one telemetry row.
     _TOKEN_DELTA_ROUTE_FIELDS = (
         "model", "cost_status", "cost_source", "pricing_version", "billing_provider", "billing_base_url",
-        "billing_mode",
+        "billing_mode", "task_id", "turn_id",
     )
 
     # ── Task telemetry (fork: task cost / outcome insights, d2d2f40e87) ──

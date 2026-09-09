@@ -325,7 +325,7 @@ def _run_overrunning_worker(conn, *, elapsed_seconds, max_runtime_seconds=None):
         max_runtime_seconds=max_runtime_seconds,
     )
     kb.claim_task(conn, tid)
-    kb._set_worker_pid(conn, tid, os.getpid())
+    kbd._set_worker_pid(conn, tid, os.getpid())
     old_started = int(time.time()) - elapsed_seconds
     with kb.write_txn(conn):
         conn.execute(

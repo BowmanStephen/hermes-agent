@@ -1707,6 +1707,8 @@ def _run_reclaim_phase(
     stale_timeout_seconds: int,
     failure_limit: int,
     reconcile_orphans: bool,
+    board: Optional[str] = None,
+    default_max_runtime_seconds: Optional[int] = None,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
@@ -1850,6 +1852,8 @@ def _dispatch_once_locked(
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans,
+        board=board,
+        default_max_runtime_seconds=default_max_runtime_seconds,
     )
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,

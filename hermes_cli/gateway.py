@@ -116,7 +116,7 @@ class WindowsGatewayService:
     gateway_create_time: float = 0.0
 
 
-def _get_service_pids(all_profiles: bool = False) -> set:
+def _get_service_pids(all_profiles: bool = False, *, fail_closed: bool = False) -> set:
     """Return PIDs currently managed by systemd or launchd gateway services.
 
     Used to avoid killing freshly-restarted service processes when sweeping
@@ -194,6 +194,11 @@ def _get_service_pids(all_profiles: bool = False) -> set:
             try:
                 _domain, pid = _locate_launchd_gateway_service(label)
             except subprocess.TimeoutExpired:
+                # ``fail_closed`` is used only by destructive cleanup.  A
+                # transient launchd lookup failure must abort that cleanup
+                # instead of turning a supervised PID into an apparent orphan.
+                if fail_closed:
+                    raise
                 continue
             if pid is not None and pid > 0:
                 pids.add(pid)
@@ -223,7 +228,10 @@ def _get_service_pids(all_profiles: bool = False) -> set:
                                     pids.add(pid)
                             except ValueError:
                                 pass
-            except (FileNotFoundError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
+                if fail_closed:
+                    raise
+            except FileNotFoundError:
                 pass
 
     return pids
@@ -2355,7 +2363,7 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
         # label — or a sibling profile's launchd gateway is misclassified as
         # an unsupervised orphan and reaped. Same class as the update-sweep
         # fix in #74075.
-        own |= _get_service_pids(all_profiles=True)
+        own |= _get_service_pids(all_profiles=True, fail_closed=is_macos())
     except Exception:
         if is_macos():
             logger.debug(

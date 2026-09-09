@@ -25,7 +25,7 @@ def test_find_gateway_pids_sees_root_gateway_serving_active_profile(
     profile_home.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(profile_home))
 
-    monkeypatch.setattr(gateway, "_get_service_pids", lambda: [])
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda all_profiles=False, **_: [])
     monkeypatch.setattr(gateway, "_scan_gateway_pids", lambda *args, **kwargs: [])
     monkeypatch.setattr(gateway, "supports_systemd_services", lambda: True)
 
@@ -50,25 +50,35 @@ def test_find_gateway_pids_sees_root_gateway_serving_active_profile(
 
 
 def test_get_service_pids_includes_root_launchd_gateway_for_named_profile(monkeypatch):
-    """A profile backend must not reap the root launchd-managed gateway."""
+    """A profile backend must not reap the root launchd-managed gateway.
+
+    Upstream scopes the default lookup to the invoking profile; destructive
+    sweeps ask for the whole fleet (``all_profiles=True``), which must include
+    the root ``ai.hermes.gateway`` service alongside the named profile.
+    """
     monkeypatch.setattr(gateway, "is_macos", lambda: True)
     monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
     monkeypatch.setattr(gateway, "get_launchd_label", lambda: "ai.hermes.gateway-analyst")
+    monkeypatch.setattr(
+        gateway,
+        "launchd_gateway_labels_for_install",
+        lambda: ["ai.hermes.gateway", "ai.hermes.gateway-analyst"],
+    )
 
-    outputs = {
-        "ai.hermes.gateway-analyst": "",
-        "ai.hermes.gateway": '{\n\t\"PID\" = 52117;\n};\n',
-    }
+    pids = {"ai.hermes.gateway-analyst": None, "ai.hermes.gateway": 52117}
 
-    def fake_run(argv, **_kwargs):
-        return SimpleNamespace(returncode=0, stdout=outputs[argv[-1]])
+    def fake_locate(label):
+        return ("gui/501", pids[label]) if label in pids else (None, None)
 
-    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+    monkeypatch.setattr(gateway, "_locate_launchd_gateway_service", fake_locate)
+    monkeypatch.setattr(
+        gateway.subprocess,
+        "run",
+        lambda argv, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
 
-    assert gateway._get_service_pids() == {52117}
-
-
-_BREAKAWAY_MARKER = "_HERMES_GATEWAY_BREAKAWAY"
+    assert gateway._get_service_pids() == set()
+    assert gateway._get_service_pids(all_profiles=True) == {52117}
 
 
 def _install_fake_gateway_run(monkeypatch, start_gateway):
@@ -666,7 +676,7 @@ class TestReapUnsupervisedGatewayOrphansMacOS:
         # _get_service_pids returns the launchd-managed gateway PID.
         # (accepts all_profiles: the reaper asks for the whole fleet, #74075)
         monkeypatch.setattr(
-            gateway, "_get_service_pids", lambda all_profiles=False: {launchd_pid}
+            gateway, "_get_service_pids", lambda all_profiles=False, **_kw: {launchd_pid}
         )
         # No pidfile-recorded gateway in this scenario.
         monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
@@ -701,7 +711,7 @@ class TestReapUnsupervisedGatewayOrphansMacOS:
         monkeypatch.setattr(gateway, "is_macos", lambda: True)
         monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
         monkeypatch.setattr(
-            gateway, "_get_service_pids", lambda all_profiles=False: {launchd_pid}
+            gateway, "_get_service_pids", lambda all_profiles=False, **_kw: {launchd_pid}
         )
         monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
 
@@ -734,18 +744,28 @@ class TestReapUnsupervisedGatewayOrphansMacOS:
             gateway, "get_launchd_label", lambda: "ai.hermes.gateway-analyst"
         )
 
-        def fake_run(argv, **_kwargs):
-            label = argv[-1]
+        monkeypatch.setattr(
+            gateway,
+            "launchd_gateway_labels_for_install",
+            lambda: ["ai.hermes.gateway", "ai.hermes.gateway-analyst"],
+        )
+
+        def fake_locate(label):
             if label == "ai.hermes.gateway":
                 root_lookup_barrier.wait(timeout=5)
-                raise subprocess.TimeoutExpired(argv, 5)
-            return SimpleNamespace(returncode=1, stdout="")
+                raise subprocess.TimeoutExpired(["launchctl", "print", label], 5)
+            return (None, None)
 
-        monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+        monkeypatch.setattr(gateway, "_locate_launchd_gateway_service", fake_locate)
+        monkeypatch.setattr(
+            gateway.subprocess,
+            "run",
+            lambda argv, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+        )
         monkeypatch.setattr(
             gateway,
             "find_gateway_pids",
-            lambda exclude_pids=None: [
+            lambda exclude_pids=None, **_kwargs: [
                 pid for pid in [root_pid] if pid not in (exclude_pids or set())
             ],
         )

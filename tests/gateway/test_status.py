@@ -1114,7 +1114,7 @@ class TestPlannedStopMarker:
         assert payload["stopper_pid"] == os.getpid()
         from agent.redact import redact_command_argv
 
-        assert payload["stopper_argv"] == " ".join(redact_command_argv(status.sys.argv))
+        assert payload["stopper_argv"] == " ".join(redact_command_argv(status.sys.argv))[:500]
         assert payload["stopper_parent_pid"] == os.getppid()
         assert "written_at" in payload
 

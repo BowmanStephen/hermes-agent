@@ -22,6 +22,9 @@ def test_execution_ledger_follows_active_profile_home(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     root_home = tmp_path / "root"
     profile_home = root_home / "profiles" / "bookie"
+    # Named profile homes are created by the profile lifecycle; cron only
+    # creates the ``cron/`` leaf inside an existing profile (never parents).
+    profile_home.mkdir(parents=True)
     env = os.environ.copy()
     env["HERMES_HOME"] = str(root_home)
     env["PYTHONPATH"] = str(repo)

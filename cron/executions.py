@@ -44,8 +44,10 @@ _PROCESS_ID = uuid.uuid4().hex
 
 
 def _connect() -> sqlite3.Connection:
+    from cron.jobs import _ensure_cron_dir
+
     executions_file = _current_executions_file()
-    executions_file.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_cron_dir(executions_file.parent)
     return sqlite3.connect(executions_file, timeout=5)
 
 

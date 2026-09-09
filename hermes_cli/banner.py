@@ -365,43 +365,73 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
 
     # Never fetch while running under pytest. The passive update check is
     # best-effort and no test asserts on the refs it moves, but the fetch is a
-    # real network write against a real checkout — and on a repository that
-    # merely REPORTS shallow (one stale ``.git/shallow`` entry is enough, even
-    # with full history present) the ``--depth 1`` below truncates that
-    # checkout to a single commit. That is how a full test run collapsed a
-    # 23,926-commit working clone on 2026-08-19. The check is env-based, like
+    # real network write against a real checkout — on a repository that merely
+    # REPORTS shallow, the ``--depth 1`` below truncates it to a single commit
+    # (that is how a full test run collapsed a 23,926-commit clone on
+    # 2026-08-19). The check is env-based, like
     # ``hermes_state._running_under_pytest``, so subprocess children of a test
-    # are covered too — in-process mocks and fixtures cannot reach those.
-    if not _running_under_pytest():
+    # are covered too. Under pytest the on-disk refs are treated as usable so
+    # the behind-count below still compares them, as it always did.
+    if _running_under_pytest():
+        fetch_ok = True
+    else:
         try:
             # Self-heal abandoned git lock files before fetching. A stale
             # .git/shallow.lock from a crashed fetch makes the fetch fail, the
             # exception below is swallowed, and stale refs get compared against
             # HEAD — silently degrading the passive check until a human removes
             # the lock (git never self-heals these).
-            from hermes_cli.gitlock import clear_stale_git_locks
+            from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
 
             clear_stale_git_locks(repo_dir)
+            # The passive check is the main tmp_pack GENERATOR on flaky lines
+            # (several aborted fetches per day) — it must also be the janitor,
+            # or debris accumulates unbounded between manual updates (#93732).
+            clear_stale_tmp_packs(repo_dir)
 
-            # Scope the fetch to the one branch the behind-count compares
-            # against. An unscoped ``git fetch origin`` transfers every remote
-            # head (~1,400 on this repo — measured 3.0 s vs 0.55 s scoped) and
-            # can burn the full 10 s timeout on slow links. ``cmd_update``
-            # already scopes its fetch for the same reason. Modern git updates
-            # the ``origin/main`` tracking ref on a scoped fetch, so the
-            # ``HEAD..origin/main`` count below is unaffected; the shallow path
-            # compares against FETCH_HEAD, which a scoped fetch also updates.
+            # Scope the fetch to the one branch the behind-count compares against.
+            # An unscoped ``git fetch origin`` transfers every remote head (~1,400
+            # on this repo — measured 3.0 s vs 0.55 s scoped) and can burn the full
+            # 10 s timeout on slow links. ``cmd_update`` already scopes its fetch
+            # for the same reason. Modern git updates the ``origin/main`` tracking
+            # ref on a scoped fetch, so the ``HEAD..origin/main`` count below is
+            # unaffected; the shallow path compares against FETCH_HEAD, which a
+            # scoped fetch also updates.
             fetch_args = ["git", "fetch", "origin", "main"]
             if is_shallow:
                 fetch_args += ["--depth", "1"]
             fetch_args.append("--quiet")
-            subprocess.run(
+            fetch_proc = subprocess.run(
                 fetch_args,
                 capture_output=True, timeout=10,
                 cwd=str(repo_dir),
             )
+            fetch_ok = fetch_proc.returncode == 0
         except Exception:
-            pass  # Offline or timeout — use stale refs, that's fine
+            fetch_ok = False  # Offline or timeout — don't use stale refs
+
+    # When the fetch fails, the local origin/main tracking ref is stale. It
+    # cannot prove *currentness* (a 0 behind-count may just mean the stale ref
+    # hasn't caught up), but if it already shows HEAD behind, that is sound
+    # evidence an update exists — the ref was good at some point in the past.
+    # Return the positive stale count; return None (inconclusive) otherwise so
+    # the caller doesn't cache a false "up to date". (#82166, review #92578)
+    if not fetch_ok:
+        if not is_shallow:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-list", "--count", "HEAD..origin/main"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=5,
+                    cwd=str(repo_dir),
+                )
+                if result.returncode == 0:
+                    behind = int(result.stdout.strip())
+                    if behind > 0:
+                        return behind
+            except Exception:
+                pass
+        return None
 
     if is_shallow:
         # No history to count across the shallow boundary. `origin/main` may not
@@ -499,10 +529,16 @@ def check_for_updates() -> Optional[int]:
             behind = _check_via_local_git(repo_dir)
 
     try:
-        cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}),
-            encoding="utf-8",
-        )
+        # Don't cache inconclusive results (None). A None means the check
+        # could not run — typically a failed git fetch. Caching None would
+        # suppress retries for the full 6-hour cache window, leaving the
+        # user with a stale "up to date" or no information for hours after
+        # connectivity is restored (#82166).
+        if behind is not None:
+            cache_file.write_text(
+                json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}),
+                encoding="utf-8",
+            )
     except Exception:
         pass
 

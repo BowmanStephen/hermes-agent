@@ -867,7 +867,13 @@ def _reset_tui_gateway_server_state():
         if isinstance(obj, dict):
             obj.clear()
 
-    if snapshot is not None:
+    # Same reasoning for the snapshot restore: what sits in sys.modules now
+    # may be a test double carrying only the seam it needs (e.g. the
+    # SimpleNamespace stub in test_web_server_approvals_broadcast.py), and
+    # restoring into it raises AttributeError at teardown. monkeypatch puts
+    # the real module back right afterwards and the next test re-snapshots,
+    # so skipping loses nothing.
+    if snapshot is not None and isinstance(getattr(mod, "_methods", None), dict):
         mod._methods.clear()
         mod._methods.update(snapshot["methods"])
         mod._cfg_cache, mod._cfg_mtime, mod._cfg_path = snapshot["cfg"]

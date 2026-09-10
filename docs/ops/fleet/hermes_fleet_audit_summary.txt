@@ -1,0 +1,16 @@
+> **STATUS (2026-09-09):** Point-in-time 2026-06-30 audit; issues resolved by the Aug rebuild (see ops/handoffs/). Historical.
+
+Hermes Fleet Audit Complete
+
+Summary of findings:
+- MacBook configuration is correct and up-to-date
+- Mac Mini SSH authentication failing (needs manual intervention)
+- VPS unreachable (network/service issues)
+- Historical configuration issues have been resolved
+- Created recovery documentation and guides
+
+Next steps:
+1. Fix Mac Mini SSH access via physical/Screen Sharing
+2. Investigate VPS connectivity issues
+3. Verify and standardize fleet configurations
+4. Implement monitoring and alerting

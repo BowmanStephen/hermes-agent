@@ -334,6 +334,32 @@ class TestGeneratedSystemdUnits:
         )
         return f"TimeoutStopSec={timeout}"
 
+    def test_system_unit_is_independent_of_callers_node_path(self, tmp_path, monkeypatch):
+        """A system unit must not change with the shell that generates it."""
+        target_home = tmp_path / "hermes"
+        target_node_dir = target_home / ".local" / "bin"
+        target_node_dir.mkdir(parents=True)
+        target_node = target_node_dir / "node"
+        target_node.write_text("#!/bin/sh\n")
+        target_node.chmod(0o755)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda _run_as_user=None: ("hermes", "hermes", str(target_home), 1000),
+        )
+
+        def generate_with_node_on_path(node_path):
+            monkeypatch.setenv("PATH", node_path)
+            return gateway_cli.generate_systemd_unit(system=True)
+
+        root_secure_path_unit = generate_with_node_on_path("/usr/bin/node")
+        hermes_login_path_unit = generate_with_node_on_path(
+            "/home/hermes/.local/bin/node"
+        )
+
+        assert root_secure_path_unit == hermes_login_path_unit
+        assert f'Environment="PATH={target_node_dir}:' in root_secure_path_unit
+
     def test_timeout_stop_sec_covers_default_cron_drain_floor(self, monkeypatch):
         """#94759: default restart_drain_timeout=0 still leaves a 30s cron
         floor plus cleanup reserve. The old max(60, drain+30)=60 unit
@@ -1479,7 +1505,7 @@ class TestSystemUnitRefreshSyncsHermesHome:
         monkeypatch.setattr(
             gateway_cli, "_build_user_local_paths", lambda home, existing: []
         )
-        monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: None)
+        monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd, path=None: None)
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "_run_systemctl", lambda *a, **k: None)
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)

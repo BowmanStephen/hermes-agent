@@ -2875,9 +2875,18 @@ def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
             reset_home_override(override_token)
 
 
-def _append_node_dir_for_service(path_entries: list[str], hermes_root: Path | None = None) -> None:
+def _append_node_dir_for_service(
+    path_entries: list[str],
+    hermes_root: Path | None = None,
+    *,
+    node_search_paths: list[str] | None = None,
+) -> None:
     """Append the Node dir a service unit should use: managed ``<hermes_root>/node`` (profile-scoped)
-    first — a unit survives reboots, so baking a shell-PATH Node is permanent breakage — else PATH lookup."""
+    first — a unit survives reboots, so baking a shell-PATH Node is permanent breakage — else PATH lookup.
+
+    User units leave ``node_search_paths`` unset and keep the calling shell's PATH as the fallback rung.
+    System units pass the target user's known local dirs so the persisted PATH is independent of the
+    invoking shell (root's secure_path vs the user's login PATH must generate the same unit)."""
     from hermes_constants import (hermes_managed_node_tree_present, iter_hermes_node_dirs)
     managed_node_present = hermes_managed_node_tree_present(hermes_root)
     for directory in iter_hermes_node_dirs(hermes_root) if managed_node_present else ():
@@ -2893,7 +2902,10 @@ def _append_node_dir_for_service(path_entries: list[str], hermes_root: Path | No
     if managed_node_present:
         return
 
-    resolved_node = shutil.which("node")
+    if node_search_paths is None:
+        resolved_node = shutil.which("node")
+    else:
+        resolved_node = shutil.which("node", path=os.pathsep.join(node_search_paths))
     if not resolved_node:
         return
 
@@ -2939,7 +2951,11 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         path_entries = [_remap_path_for_user(p, home_dir) for p in path_entries]
         # Managed Node for the TARGET user's tree, prepended so it outranks remapped shell-PATH entries.
         _target_node_entries: list[str] = []
-        _append_node_dir_for_service(_target_node_entries, Path(hermes_home) if hermes_home else None)
+        _append_node_dir_for_service(
+            _target_node_entries,
+            Path(hermes_home) if hermes_home else None,
+            node_search_paths=_build_user_local_paths(Path(home_dir), []),
+        )
         path_entries = [e for e in _target_node_entries if e not in path_entries] + path_entries
         user_home = Path(home_dir)
         identity_lines = f"User={username}\nGroup={group_name}\n"

@@ -207,6 +207,28 @@ def _git_count(args: list[str], *, cwd: Path) -> Optional[int]:
     return None
 
 
+def _shallow_boundary_cuts_head(repo_dir: Path) -> bool:
+    """True unless every ``.git/shallow`` boundary is proven unrelated to HEAD's history.
+
+    ``rev-parse --is-shallow-repository`` answers "true" whenever ``.git/shallow`` lists any commit
+    — one stale entry left by an old ``fetch --depth`` of another ref is enough, even with the full
+    history behind HEAD. A ``fetch --depth 1`` on such a repo does not preserve a boundary, it adds
+    the fetched tip as one: an up-to-date full clone collapses to a single commit. Only a boundary
+    that is an ancestor of HEAD actually truncates it. An unreadable list keeps the flag as is.
+    """
+    shallow_path = _git_stdout(["rev-parse", "--git-path", "shallow"], cwd=repo_dir)
+    boundaries = _quiet(lambda: (repo_dir / shallow_path).read_text(encoding="utf-8").split())
+    if boundaries is None:
+        return True
+    return any(_git_ok(["merge-base", "--is-ancestor", sha, "HEAD"], cwd=repo_dir) for sha in boundaries)
+
+
+def _is_shallow_checkout(repo_dir: Path) -> bool:
+    """True when HEAD's history is genuinely truncated (see ``_shallow_boundary_cuts_head``)."""
+    return (_git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir) == "true"
+            and _shallow_boundary_cuts_head(repo_dir))
+
+
 def _is_full_sha(value: Optional[str]) -> bool:
     return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value)
 
@@ -286,7 +308,7 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     # the repo and `rev-list --count HEAD..origin/main` would report a bogus "12492 commits
     # behind". Fetch with --depth 1 to preserve the boundary and compare tip SHAs instead. Full
     # clones keep the exact count path. Mirrors apps/desktop/electron/main.cjs.
-    is_shallow = _git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir) == "true"
+    is_shallow = _is_shallow_checkout(repo_dir)
 
     def _fetch() -> bool:
         # Self-heal abandoned git lock files first. A stale .git/shallow.lock from a crashed fetch

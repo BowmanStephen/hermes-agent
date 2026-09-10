@@ -545,7 +545,12 @@ def _base_git_cmd() -> list[str]:
 
 
 def _is_shallow_checkout(git_cmd) -> bool:
-    return _git_run(git_cmd, ["rev-parse", "--is-shallow-repository"]).stdout.strip() == "true"
+    """True when HEAD's history is genuinely truncated, not merely flagged by a stale ``.git/shallow``
+    entry (see ``banner._shallow_boundary_cuts_head``)."""
+    if _git_run(git_cmd, ["rev-parse", "--is-shallow-repository"]).stdout.strip() != "true":
+        return False
+    from hermes_cli.banner import _shallow_boundary_cuts_head
+    return _shallow_boundary_cuts_head(_m().PROJECT_ROOT)
 
 
 def _tip_shas(git_cmd, target_ref: str) -> tuple[str, str]:

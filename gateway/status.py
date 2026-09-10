@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
 from hermes_constants import _get_platform_default_hermes_home, get_hermes_home
+from hermes_state_guard import _STATE_DB_GUARD_BYPASS_ENV, _TEST_ISOLATION_MARKER_ENV
 from utils import atomic_json_write
 
 if sys.platform == "win32":
@@ -164,6 +165,22 @@ def _get_gateway_lock_path(pid_path: Optional[Path] = None) -> Path:
 
 def _get_runtime_status_path() -> Path:
     return _get_process_hermes_home() / _RUNTIME_STATUS_FILE
+
+
+def _ensure_runtime_status_write_is_isolated(home: Path) -> None:
+    """Refuse a status write into the production home from a test process. Tests that rebuild
+    ``os.environ`` with ``clear=True`` drop ``HERMES_HOME`` too, and the writer would then fall back
+    to the operator's live ``~/.hermes/gateway_state.json``. The conftest's ``HERMES_TEST_ISOLATION``
+    marker is the authority (same semantics and bypass as the state.db guard); fail closed here, the
+    one boundary every status writer converges on."""
+    if not os.environ.get(_TEST_ISOLATION_MARKER_ENV) or os.environ.get(_STATE_DB_GUARD_BYPASS_ENV):
+        return
+    try:
+        is_production = _same_hermes_home(home, _get_platform_default_hermes_home())
+    except Exception as exc:
+        raise RuntimeError("test isolation could not verify gateway status write destination") from exc
+    if is_production:
+        raise RuntimeError("test isolation refused gateway status write to production home")
 
 
 def _get_lock_dir() -> Path:
@@ -799,6 +816,7 @@ def write_runtime_status(
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
+    _ensure_runtime_status_write_is_isolated(path.parent)
     payload = _read_json_file(path) or _build_runtime_status_record()
     previous_payload = copy.deepcopy(payload)
     current_record = _build_pid_record()

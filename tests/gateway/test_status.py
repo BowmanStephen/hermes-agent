@@ -218,6 +218,30 @@ class TestScopedGatewayPidQuery:
 
 
 class TestGatewayRuntimeStatus:
+    def test_test_isolation_refuses_write_to_production_home(self, tmp_path, monkeypatch):
+        """A clear-environment test must not fall back to the live gateway_state.json."""
+        production_home = tmp_path / ".hermes"
+        production_home.mkdir()
+        state_path = production_home / "gateway_state.json"
+        original = {"gateway_state": "running", "sentinel": "preserve"}
+        state_path.write_text(json.dumps(original), encoding="utf-8")
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setenv("HERMES_TEST_ISOLATION", str(tmp_path / "test-home"))
+        monkeypatch.delenv("HERMES_STATE_DB_GUARD_BYPASS", raising=False)
+
+        with pytest.raises(RuntimeError, match="test isolation"):
+            status.write_runtime_status(gateway_state="stopped")
+
+        assert json.loads(state_path.read_text(encoding="utf-8")) == original
+
+        # Same escape hatch as the state.db guard: a child that must look like a real
+        # process exports the bypass instead of stripping the isolation marker.
+        monkeypatch.setenv("HERMES_STATE_DB_GUARD_BYPASS", "1")
+        status.write_runtime_status(gateway_state="stopped")
+        assert json.loads(state_path.read_text(encoding="utf-8"))["gateway_state"] == "stopped"
+
     def test_clear_profile_platforms_preserves_primary_entries(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         (tmp_path / "gateway_state.json").write_text(

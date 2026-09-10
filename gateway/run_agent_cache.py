@@ -638,6 +638,17 @@ class GatewayAgentCacheMixin:
         resume, so terminal sandbox, browser daemon and bg processes outlive the AIAgent instance."""
         if agent is None:
             return
+        # Memory providers are owned by this AIAgent, not by the task-scoped tool state that soft
+        # eviction deliberately preserves. Once the cache drops the agent nothing can reuse its
+        # MemoryManager; leaving it running strands provider-owned network clients (Hindsight owns an
+        # aiohttp ClientSession) until GC reports them as unclosed. shutdown_all() rather than
+        # shutdown_memory_provider(): the latter also fires on_session_end, which would invent a
+        # session boundary for mode="none" sessions. The cap path commits finalizable sessions
+        # explicitly (_commit_memory_before_soft_evict) before it reaches this release method.
+        with suppress(Exception):
+            memory_manager = getattr(agent, "_memory_manager", None)
+            if memory_manager is not None and not getattr(memory_manager, "_shutting_down", False):
+                memory_manager.shutdown_all()
         with suppress(Exception):
             if hasattr(agent, "release_clients"):
                 agent.release_clients()

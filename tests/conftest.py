@@ -848,6 +848,15 @@ _GIT_READONLY_SUBCOMMANDS = frozenset({
     "for-each-ref", "grep", "log", "ls-files", "ls-remote", "ls-tree",
     "merge-base", "name-rev", "rev-list", "rev-parse", "shortlog", "show",
     "show-ref", "status", "symbolic-ref", "var", "verify-pack", "version",
+    # ``credential fill|approve|reject`` talks to credential helpers, never to the repository.
+    "credential",
+})
+
+# ``git config`` reads. Any other config form (set, --add, --unset, --edit, section renames)
+# stays refused: writing the developer's config is as much a mutation as writing the repo.
+_GIT_CONFIG_READ_FLAGS = frozenset({
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool",
+    "--list", "-l", "--show-origin", "--show-scope",
 })
 
 # Subcommands that act on a repository named by a positional argument rather
@@ -871,13 +880,22 @@ def _git_invocation_target(cmd, cwd):
     target = Path(cwd) if cwd is not None else Path.cwd()
     subcommand = None
     expect_dir = False
+    expect_value = False
     for arg in parts[1:]:
         if expect_dir:
             target = Path(arg)
             expect_dir = False
             continue
+        if expect_value:
+            expect_value = False
+            continue
         if arg in {"-C", "--git-dir", "--work-tree"}:
             expect_dir = True
+            continue
+        if arg in {"-c", "--config-env", "--namespace", "--exec-path"}:
+            # Global options that take a value: ``git -c core.askPass= credential fill`` must
+            # not read ``core.askPass=`` as the subcommand.
+            expect_value = True
             continue
         if arg.startswith("--git-dir=") or arg.startswith("--work-tree="):
             target = Path(arg.split("=", 1)[1])
@@ -921,6 +939,13 @@ def _guard_git_argv(cmd, cwd):
         return
     if subcommand in _GIT_READONLY_SUBCOMMANDS:
         return
+    if subcommand == "config":
+        parts = [os.fspath(part) for part in cmd]
+        rest = parts[parts.index("config") + 1:]
+        if any(arg in _GIT_CONFIG_READ_FLAGS or arg.startswith("--get") for arg in rest) or (
+            rest and rest[0] in {"get", "list"}
+        ):
+            return
 
     try:
         resolved = target.expanduser().resolve()

@@ -2162,9 +2162,11 @@ def _profile_arg(hermes_home: str | None = None, default_root: str | Path | None
 
 def _systemd_unit_paths_for_service(service_name: str) -> tuple[Path, Path]:
     """Return user- then system-scope paths for a specific systemd service."""
+    # ``Path(expanduser)`` rather than ``Path.home()`` and a literal system dir rather than
+    # ``_SYSTEM_UNIT_DIR``: the service-identity and linger tests stub ``Path`` with a plain
+    # callable to redirect these two locations.
     return (
-        Path.home() / ".config" / "systemd" / "user" / f"{service_name}.service",
-        # Literal path (not _SYSTEM_UNIT_DIR): the service-identity tests stub ``Path`` to redirect it.
+        Path(os.path.expanduser("~")) / ".config" / "systemd" / "user" / f"{service_name}.service",
         Path("/etc/systemd/system") / f"{service_name}.service",
     )
 
@@ -2216,10 +2218,15 @@ def get_service_name() -> str:
     if not suffix:
         return _SERVICE_BASE
     scoped_name = f"{_SERVICE_BASE}-{suffix}"
-    if any(path.exists() for path in _systemd_unit_paths_for_service(scoped_name)):
-        return scoped_name
-    if _legacy_base_system_unit_matches_current_home():
-        return _SERVICE_BASE
+    # Best-effort compatibility probe: any failure (unreadable units, a stubbed ``Path`` in
+    # tests) means "no legacy unit", never an error out of a name lookup.
+    try:
+        if any(path.exists() for path in _systemd_unit_paths_for_service(scoped_name)):
+            return scoped_name
+        if _legacy_base_system_unit_matches_current_home():
+            return _SERVICE_BASE
+    except Exception:
+        pass
     return scoped_name
 
 

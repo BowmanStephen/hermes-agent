@@ -224,7 +224,6 @@ describe('scanDiskPlugins (#66899)', () => {
 
   it('waits for a hot-edited entry file to settle before importing it', async () => {
     desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
-    agentPluginsRoot.mockResolvedValue('')
     standaloneRootWith('race')
 
     const register = vi.fn()
@@ -284,7 +283,6 @@ describe('scanDiskPlugins (#66899)', () => {
 
   it('reports a plugin that never settles after the final import attempt', async () => {
     desktopPluginsRoot.mockResolvedValue('/local/.hermes/desktop-plugins')
-    agentPluginsRoot.mockResolvedValue('')
     standaloneRootWith('broken')
 
     const partial = '<<<<<<< HEAD\nexport default { id: "broken", register() {} }'

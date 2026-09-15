@@ -3066,6 +3066,19 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             success=True, message_id=message_id, raw_response={"thread_id": thread_id},
         )
 
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a bot-posted Discord message used for progress cleanup."""
+        if not self._client:
+            return False
+        try:
+            channel = await self._resolve_channel(chat_id)
+            message = channel.get_partial_message(int(message_id))
+            await message.delete()
+            return True
+        except Exception as e:
+            logger.debug("[%s] Failed to delete Discord message %s: %s", self.name, message_id, e)
+            return False
+
     async def edit_message(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
         metadata: Optional[Dict[str, Any]] = None,

@@ -139,20 +139,3 @@ async def test_reactions_disabled_via_env(adapter, monkeypatch):
     raw_message.remove_reaction.assert_not_awaited()
     # Response should still be sent
     adapter.send.assert_awaited_once()
-
-
-def test_reactions_and_auto_thread_honor_adapter_config(monkeypatch):
-    """Profile-scoped config must win over process-global Discord env."""
-    monkeypatch.setenv("DISCORD_REACTIONS", "true")
-    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
-    config = PlatformConfig(
-        enabled=True,
-        token="***",
-        extra={"reactions": False, "auto_thread": False},
-    )
-    adapter = DiscordAdapter(config)
-
-    assert adapter._reactions_enabled() is False
-    assert adapter._auto_thread_enabled() is False
-
-

@@ -1041,84 +1041,69 @@ def test_spawn_hermes_action_scrubs_gateway_loop_guard_env(monkeypatch, tmp_path
     assert captured["env"]["OPENAI_API_KEY"] == "default-action-provider-key"
 
 
-def test_named_profile_action_isolates_parent_env_and_loads_target_env(
-    monkeypatch, tmp_path
-):
-    """A dashboard profile action must not borrow the dashboard profile's
-    platform/provider environment, while normal target-profile dotenv loading
-    remains intact in the child.
-    """
+def test_named_profile_action_isolates_parent_env_and_loads_target_env(monkeypatch, tmp_path):
+    """A dashboard action for a named profile must not borrow the dashboard profile's
+    platform/provider environment, while the target profile's own dotenv still loads in the child."""
     import json
     import subprocess
     import sys
     from pathlib import Path
 
     import hermes_cli.env_loader as env_loader
-    import hermes_cli.web_server as _ws_root
-    import hermes_cli.web_server_gateway as ws  # action spawn moved here in 0.21.1
+    import hermes_cli.web_server as ws
 
     user_home = tmp_path / "user"
     default_home = user_home / ".hermes"
-    target_home = default_home / "profiles" / "repair-verifier"
+    target_home = default_home / "profiles" / "verifier"
     target_home.mkdir(parents=True)
-    default_home.mkdir(exist_ok=True)
 
     (default_home / ".env").write_text(
-        "\n".join(
-            [
-                "DISCORD_BOT_TOKEN=default-discord",
-                "API_SERVER_ENABLED=true",
-                "API_SERVER_KEY=default-api-server",
-                "BLUEBUBBLES_SERVER_URL=http://127.0.0.1:1234",
-                "BLUEBUBBLES_PASSWORD=default-bluebubbles",
-                "NTFY_TOPIC=default-topic",
-                "NTFY_TOKEN=default-ntfy",
-                "OPENAI_API_KEY=default-openai",
-                "ZAI_API_KEY=default-zai",
-                # Locally-named routing credentials must be isolated too, even
-                # when they do not end in a generic secret suffix.
-                "A2A_AUTH_MINI=default-a2a-auth",
-            ]
-        )
-        + "\n",
+        "\n".join([
+            "DISCORD_BOT_TOKEN=default-discord",
+            "API_SERVER_ENABLED=true",
+            "API_SERVER_KEY=default-api-server",
+            "BLUEBUBBLES_SERVER_URL=http://127.0.0.1:1234",
+            "BLUEBUBBLES_PASSWORD=default-bluebubbles",
+            "NTFY_TOPIC=default-topic",
+            "NTFY_TOKEN=default-ntfy",
+            "OPENAI_API_KEY=default-openai",
+            "ZAI_API_KEY=default-zai",
+            # Locally named routing credentials must be isolated too, even without a secret suffix.
+            "A2A_AUTH_MINI=default-a2a-auth",
+        ]) + "\n",
         encoding="utf-8",
     )
     (target_home / ".env").write_text(
-        "\n".join(
-            [
-                "A2A_PORT=9917",
-                "OPENAI_API_KEY=target-openai",
-                "TARGET_ONLY_TOKEN=target-only",
-            ]
-        )
-        + "\n",
+        "\n".join(["A2A_PORT=9917", "OPENAI_API_KEY=target-openai", "TARGET_ONLY_TOKEN=target-only"]) + "\n",
         encoding="utf-8",
     )
 
     monkeypatch.setattr(Path, "home", lambda: user_home)
     monkeypatch.setenv("HERMES_HOME", str(default_home))
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "default-discord")
-    monkeypatch.setenv("API_SERVER_ENABLED", "true")
-    monkeypatch.setenv("API_SERVER_KEY", "default-api-server")
-    monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://127.0.0.1:1234")
-    monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "default-bluebubbles")
-    monkeypatch.setenv("NTFY_TOPIC", "default-topic")
-    monkeypatch.setenv("NTFY_TOKEN", "default-ntfy")
-    monkeypatch.setenv("OPENAI_API_KEY", "default-openai")
-    monkeypatch.setenv("ZAI_API_KEY", "default-zai")
-    monkeypatch.setenv("A2A_AUTH_MINI", "default-a2a-auth")
-    monkeypatch.setenv("EXTERNAL_PROFILE_AUTH", "default-secret-source-auth")
-    monkeypatch.setenv("HERMES_ACP_AUTH_METHOD", "default-acp")
-    monkeypatch.setenv("PROFILE_ENV_TEST_BENIGN", "keep-me")
-    monkeypatch.setattr(ws, "_ACTION_LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(ws, "_ACTION_PROCS", {})
+    for key, value in {
+        "DISCORD_BOT_TOKEN": "default-discord",
+        "API_SERVER_ENABLED": "true",
+        "API_SERVER_KEY": "default-api-server",
+        "BLUEBUBBLES_SERVER_URL": "http://127.0.0.1:1234",
+        "BLUEBUBBLES_PASSWORD": "default-bluebubbles",
+        "NTFY_TOPIC": "default-topic",
+        "NTFY_TOKEN": "default-ntfy",
+        "OPENAI_API_KEY": "default-openai",
+        "ZAI_API_KEY": "default-zai",
+        "A2A_AUTH_MINI": "default-a2a-auth",
+        "EXTERNAL_PROFILE_AUTH": "default-secret-source-auth",
+        "HERMES_ACP_AUTH_METHOD": "default-acp",
+        "PROFILE_ENV_TEST_BENIGN": "keep-me",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(_web_server_gateway, "_ACTION_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(_web_server_gateway, "_ACTION_PROCS", {})
     monkeypatch.setattr(
         env_loader,
         "get_secret_source_values",
         lambda home: (
             {"EXTERNAL_PROFILE_AUTH": "default-secret-source-auth"}
-            if Path(home) == default_home
-            else {}
+            if Path(home).resolve() == default_home.resolve() else {}
         ),
     )
 
@@ -1134,62 +1119,36 @@ def test_named_profile_action_isolates_parent_env_and_loads_target_env(
         return _FakeProc()
 
     monkeypatch.setattr(ws.subprocess, "Popen", _fake_popen)
-    ws._spawn_hermes_action(
-        ["-p", "repair-verifier", "gateway", "restart"],
-        "gateway-restart",
-    )
+    _web_server_gateway._spawn_hermes_action(["-p", "verifier", "gateway", "restart"], "gateway-restart")
 
     child_env = captured["env"]
-    assert captured["cmd"][-4:] == [
-        "-p",
-        "repair-verifier",
-        "gateway",
-        "restart",
-    ]
+    assert captured["cmd"][-4:] == ["-p", "verifier", "gateway", "restart"]
     assert child_env["HERMES_HOME"] == str(target_home)
     assert child_env["HERMES_NONINTERACTIVE"] == "1"
     assert child_env["PROFILE_ENV_TEST_BENIGN"] == "keep-me"
     for leaked_key in (
-        "DISCORD_BOT_TOKEN",
-        "API_SERVER_ENABLED",
-        "API_SERVER_KEY",
-        "BLUEBUBBLES_SERVER_URL",
-        "BLUEBUBBLES_PASSWORD",
-        "NTFY_TOPIC",
-        "NTFY_TOKEN",
-        "OPENAI_API_KEY",
-        "ZAI_API_KEY",
-        "A2A_AUTH_MINI",
-        "EXTERNAL_PROFILE_AUTH",
-        "HERMES_ACP_AUTH_METHOD",
+        "DISCORD_BOT_TOKEN", "API_SERVER_ENABLED", "API_SERVER_KEY", "BLUEBUBBLES_SERVER_URL",
+        "BLUEBUBBLES_PASSWORD", "NTFY_TOPIC", "NTFY_TOKEN", "OPENAI_API_KEY", "ZAI_API_KEY",
+        "A2A_AUTH_MINI", "EXTERNAL_PROFILE_AUTH", "HERMES_ACP_AUTH_METHOD",
     ):
-        assert leaked_key not in child_env
+        assert leaked_key not in child_env, leaked_key
 
-    # Exercise the real dotenv loader in a fresh interpreter using precisely
-    # the environment handed to the named child. The target profile's own
-    # values must become available without reviving any default-profile value.
+    # Exercise the real dotenv loader in a fresh interpreter with precisely the environment handed
+    # to the named child: the target profile's own values must load without reviving any
+    # default-profile value.
     monkeypatch.setattr(ws.subprocess, "Popen", real_popen)
     probe = subprocess.run(
         [
-            sys.executable,
-            "-c",
-            (
-                "import json, os; "
-                "from hermes_cli.env_loader import load_hermes_dotenv; "
-                "load_hermes_dotenv(hermes_home=os.environ['HERMES_HOME']); "
-                "keys=['A2A_PORT','OPENAI_API_KEY','TARGET_ONLY_TOKEN',"
-                "'DISCORD_BOT_TOKEN','API_SERVER_ENABLED','API_SERVER_KEY',"
-                "'BLUEBUBBLES_SERVER_URL','BLUEBUBBLES_PASSWORD','NTFY_TOPIC',"
-                "'NTFY_TOKEN','ZAI_API_KEY','A2A_AUTH_MINI',"
-                "'EXTERNAL_PROFILE_AUTH']; "
-                "print(json.dumps({key: os.environ.get(key) for key in keys}))"
-            ),
+            sys.executable, "-c",
+            "import json, os; "
+            "from hermes_cli.env_loader import load_hermes_dotenv; "
+            "load_hermes_dotenv(hermes_home=os.environ['HERMES_HOME']); "
+            "keys=['A2A_PORT','OPENAI_API_KEY','TARGET_ONLY_TOKEN','DISCORD_BOT_TOKEN',"
+            "'API_SERVER_ENABLED','API_SERVER_KEY','BLUEBUBBLES_SERVER_URL','BLUEBUBBLES_PASSWORD',"
+            "'NTFY_TOPIC','NTFY_TOKEN','ZAI_API_KEY','A2A_AUTH_MINI','EXTERNAL_PROFILE_AUTH']; "
+            "print(json.dumps({key: os.environ.get(key) for key in keys}))",
         ],
-        cwd=Path(_ws_root.PROJECT_ROOT),
-        env=child_env,
-        check=True,
-        capture_output=True,
-        text=True,
+        cwd=Path(ws.PROJECT_ROOT), env=child_env, check=True, capture_output=True, text=True,
     )
     loaded = json.loads(probe.stdout.strip().splitlines()[-1])
     assert loaded == {

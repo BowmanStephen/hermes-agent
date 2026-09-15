@@ -34,7 +34,7 @@ def _clean_env(monkeypatch):
                 "ELEVENLABS_API_KEY", "GROQ_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     # Default: empty config, no MCP servers, local tts/stt.
-    monkeypatch.setattr(doctor_live, "_load_config", lambda: {})
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {})
     # Default: browser not installed.
     monkeypatch.setattr(doctor_live, "_browser_available", lambda: False)
 
@@ -134,7 +134,7 @@ class TestConfiguredOnlySelection:
 
     def test_mcp_servers_probed_per_configured_server(self, monkeypatch):
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"mcp_servers": {"alpha": {"url": "https://x"},
                                      "beta": {"command": "foo"}}})
         probed = []
@@ -172,7 +172,7 @@ class TestConfiguredOnlySelection:
 
     def test_tts_local_provider_skipped(self, monkeypatch):
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"tts": {"provider": "edge"}})
         results = {r.name: r for r in run_live_checks([])}
         assert results["TTS"].status == "skip"
@@ -180,7 +180,7 @@ class TestConfiguredOnlySelection:
     def test_tts_openai_probed_with_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"tts": {"provider": "openai"}})
         monkeypatch.setattr(
             doctor_live, "_http_get",
@@ -191,7 +191,7 @@ class TestConfiguredOnlySelection:
     def test_stt_groq_probed_with_key(self, monkeypatch):
         monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"stt": {"provider": "groq"}})
         monkeypatch.setattr(
             doctor_live, "_http_get",
@@ -201,7 +201,7 @@ class TestConfiguredOnlySelection:
 
     def test_stt_provider_configured_but_key_missing_warns(self, monkeypatch):
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"stt": {"provider": "groq"}})
         results = {r.name: r for r in run_live_checks([])}
         assert results["STT"].status == "warn"
@@ -317,7 +317,7 @@ class TestFailureIsolation:
 
     def test_mcp_probe_failure_isolated_per_server(self, monkeypatch):
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"mcp_servers": {"bad": {"url": "https://x"},
                                      "good": {"url": "https://y"}}})
 
@@ -347,7 +347,7 @@ class TestTimeoutHandling:
     def test_probe_timeout_bounded_and_configurable(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
         monkeypatch.setattr(
-            doctor_live, "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"doctor": {"live_probe_timeout": 3}})
         seen = {}
 

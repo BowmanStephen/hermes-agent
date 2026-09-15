@@ -56,25 +56,46 @@ def _memory_text(agent: Any) -> str:
 
 
 def _context_categories(agent: Any, messages) -> Optional[Dict[str, int]]:
-    """Reuse the existing live context estimator when a full agent is present."""
-    try:
-        from agent.context_breakdown import compute_session_context_breakdown
+    """Prompt-side buckets, mirroring ``compute_session_context_breakdown`` minus its
+    conversation estimate.
 
-        payload = compute_session_context_breakdown(agent, messages)
-        values = {
-            str(item.get("id")): int(item.get("tokens") or 0)
-            for item in payload.get("categories", [])
-        }
+    That function looks ``estimate_messages_tokens_rough`` up at call time, and the
+    compression tests script that estimator turn by turn; one extra call from telemetry
+    shifts the script and triggers a phantom compaction. Conversation tokens therefore
+    come from this module's import-time binding in ``build_task_context_breakdown``.
+    """
+    try:
+        from agent.context_breakdown import (
+            _chars_to_tokens,
+            _join,
+            _json_tokens,
+            _memory_blocks,
+            _skills_block,
+            _split_tools,
+            _strip_blocks,
+        )
+        from agent.system_prompt import build_system_prompt_parts
+
+        parts = build_system_prompt_parts(agent)
+        stable = parts.get("stable", "") or ""
+        skills_index = _skills_block(stable)
+        memory_block, user_block = _memory_blocks(agent)
+        system_prompt_text = _join(
+            _strip_blocks(stable, skills_index),
+            _strip_blocks(parts.get("volatile", "") or "", memory_block, user_block),
+        )
+        builtin_tools, mcp_tools, subagent_tools = _split_tools(
+            list(getattr(agent, "tools", None) or [])
+        )
         return {
-            "system_prompt": values.get("system_prompt", 0)
-            + values.get("skills", 0),
-            "tools": values.get("tool_definitions", 0)
-            + values.get("mcp", 0)
-            + values.get("subagent_definitions", 0),
-            # The existing estimator's rules bucket is the workspace/context
-            # tier. It includes the context-file payload and coding snapshot.
-            "context_files": values.get("rules", 0),
-            "memory": values.get("memory", 0),
+            "system_prompt": _chars_to_tokens(system_prompt_text)
+            + _chars_to_tokens(skills_index),
+            "tools": _json_tokens(builtin_tools)
+            + _json_tokens(mcp_tools)
+            + _json_tokens(subagent_tools),
+            # The rules tier is the workspace/context payload (context files, coding snapshot).
+            "context_files": _chars_to_tokens(parts.get("context", "") or ""),
+            "memory": _chars_to_tokens(_join(memory_block, user_block)),
         }
     except Exception:
         return None

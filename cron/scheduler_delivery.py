@@ -1213,18 +1213,7 @@ def _resolve_target_transport(
             from gateway.config import PlatformConfig
             pconfig = PlatformConfig(enabled=True)
     elif not pconfig or not pconfig.enabled:
-        # Multiplex-host carve-out: a profile served via profile_routes
-        # deliberately disables platforms the HOST gateway's adapter fronts,
-        # so the profile-scoped config gate must not reject a live adapter
-        # the multiplex ticker passed in — same reasoning as the relay
-        # carve-out above. Without a live adapter (e.g. a standalone profile
-        # gateway run) the gate still fails closed.
-        host_adapter = (target_adapters or {}).get(platform) if isinstance(target_adapters, dict) else None
-        if host_adapter is None:
-            return None, f"platform '{platform_name}' not configured/enabled"
-        from gateway.config import PlatformConfig
-        pconfig = PlatformConfig(enabled=True)
-        runtime_adapter = host_adapter
+        return None, f"platform '{platform_name}' not configured/enabled"
     return (transport, pconfig, runtime_adapter, target_adapters), None
 
 

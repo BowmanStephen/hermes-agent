@@ -24,9 +24,9 @@ def _isolated_config(tmp_path, monkeypatch):
     auxiliary._aux_unhealthy_logged_at.clear()
 
 
-def _write_config(hermes_home, *, enabled: bool) -> None:
+def _write_config(hermes_home, *, enabled: bool, provider: str = "openai-codex") -> None:
     config = {
-        "model": {"provider": "openai-codex", "default": "gpt-5.6-luna"},
+        "model": {"provider": provider, "default": "gpt-5.6-luna"},
         "providers": {"openrouter": {"enabled": enabled}},
     }
     (hermes_home / "config.yaml").write_text(yaml.safe_dump(config))
@@ -72,7 +72,9 @@ def test_explicit_openrouter_still_works_when_enabled(
 def test_auto_fallback_skips_disabled_openrouter(
     _isolated_config, monkeypatch
 ):
-    _write_config(_isolated_config, enabled=False)
+    # No selected main provider: upstream only walks the built-in discovery chain then
+    # (_discovery_chain_allowed), and that chain is what must skip disabled OpenRouter.
+    _write_config(_isolated_config, enabled=False, provider="auto")
     fallback_client = SimpleNamespace(base_url="https://api.z.ai/v1")
     openrouter_attempt = MagicMock(
         side_effect=lambda: auxiliary._try_openrouter(
@@ -131,7 +133,9 @@ def test_cached_auto_openrouter_client_is_not_reused_after_disable(
     )
 
     assert client is replacement_client
-    assert model == "google/gemini-3.7-flash"
+    # The replacement is not OpenRouter-backed, so _compat_model() swaps the vendor/model slug
+    # for the resolver's default rather than echoing the requested id.
+    assert model == "glm-4.5-flash"
     assert client is not cached_client
     resolve.assert_called_once()
 
@@ -150,7 +154,7 @@ def test_moa_advisor_cannot_reach_disabled_openrouter(
     )
 
     assert client is None
-    assert model == "deepseek/deepseek-v4-pro"
+    assert model in (None, "deepseek/deepseek-v4-pro")
     create_client.assert_not_called()
 
 

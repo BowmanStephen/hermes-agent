@@ -167,41 +167,39 @@ def _get_runtime_status_path() -> Path:
 
 
 def _ensure_runtime_status_write_is_isolated(home: Path) -> None:
-    """Refuse status writes that escape the test sandbox.
+    """Refuse status writes into the real production root from a test process.
 
     Some tests rebuild ``os.environ`` with ``clear=True`` to exercise missing configuration.
     That drops ``HERMES_HOME`` *and* the ``HERMES_TEST_ISOLATION`` marker in one step, so the
     status writer would silently fall back to the operator's live ``~/.hermes/gateway_state.json``
-    (it did, on 2026-09-15, from a per-file pytest subprocess). Test context is therefore taken
-    from ``hermes_state_guard._in_test_context()``: the env marker first, backed by pytest
-    process ancestry, which survives an env rebuild. Under test the only legitimate target is the
-    ``HERMES_HOME`` the test set (tests that monkeypatch ``Path.home`` make the platform default
-    coincide with it, so "same as production home" is not the right test); no ``HERMES_HOME``
-    at all means the write is headed for production and fails closed here, where every status
-    writer converges.
+    (it did, on 2026-09-15, from a per-file pytest subprocess). Test context therefore comes from
+    ``hermes_state_guard._in_test_context()`` (env marker backed by pytest ancestry, which survives
+    an env rebuild) and the production root from ``_real_platform_state_root()`` (passwd-derived,
+    immune to the ``Path.home`` monkeypatches some upstream tests use, which would otherwise make a
+    sandbox home look like production). Fails closed at this final write boundary, where every
+    status writer converges.
     """
     if os.environ.get("HERMES_STATE_DB_GUARD_BYPASS") == "1":
         return
     try:
-        from hermes_state_guard import _in_test_context
+        from hermes_state_guard import _in_test_context, _real_platform_state_root
     except Exception:
-        _in_test_context = None
-    if _in_test_context is not None:
+        if not os.environ.get("HERMES_TEST_ISOLATION"):
+            return
+        production_home = _get_platform_default_hermes_home()
+    else:
         if not _in_test_context():
             return
-    elif not os.environ.get("HERMES_TEST_ISOLATION"):
-        return
-    test_home = os.environ.get("HERMES_HOME")
+        production_home = _real_platform_state_root()
     try:
-        if test_home and _same_hermes_home(home, test_home):
+        if production_home is None or not _same_hermes_home(home, production_home):
             return
     except Exception as exc:
         raise RuntimeError(
             "test isolation could not verify gateway status write destination"
         ) from exc
     raise RuntimeError(
-        "test isolation refused gateway status write outside the test HERMES_HOME "
-        f"(target {home}, HERMES_HOME={test_home or '<unset>'})"
+        f"test isolation refused gateway status write to production home {home}"
     )
 
 

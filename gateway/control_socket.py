@@ -264,10 +264,38 @@ class _PipeControlProtocol(asyncio.Protocol):
                 self._transport.close()
 
 
+def _refuse_production_home_under_test(home: Path, verb: str) -> None:
+    """A test process must never drive the operator's live gateway.
+
+    ``pause-for-update`` makes the gateway drain and exit (the service manager relaunches it);
+    a test that rebuilt ``os.environ`` with ``clear=True`` resolves ``get_hermes_home()`` to the
+    real ``~/.hermes`` and would send that verb to the production socket. Same detector and
+    production root as ``gateway.status._ensure_runtime_status_write_is_isolated``.
+    """
+    if os.environ.get("HERMES_STATE_DB_GUARD_BYPASS") == "1":
+        return
+    try:
+        from hermes_state_guard import _in_test_context, _real_platform_state_root
+    except Exception:
+        return
+    if not _in_test_context():
+        return
+    root = _real_platform_state_root()
+    try:
+        if root is None or Path(home).resolve() != root:
+            return
+    except Exception:
+        return
+    raise RuntimeError(
+        f"test isolation refused gateway control verb {verb!r} against production home {home}"
+    )
+
+
 def query_gateway_control(home: Path, verb: str, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
     """Ask the gateway serving ``home`` a control verb; returns its ``result`` payload. Any failure (no/stale
     socket, timeout, malformed answer, ``ok: false``) returns None so callers fall back to the scan layer.
     Never raises."""
+    _refuse_production_home_under_test(home, verb)
     request = json.dumps({"verb": verb, "id": 1, "protocol": CONTROL_PROTOCOL_VERSION}).encode("utf-8") + b"\n"
     query = _query_windows_pipe if _IS_WINDOWS else _query_unix_socket
     try:

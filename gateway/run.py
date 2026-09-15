@@ -5239,6 +5239,11 @@ async def _start_gateway_shutdown_tail(
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """Start the gateway and run until interrupted; False if it failed to start (non-zero exit so
     systemd can auto-restart). ``replace`` kills any existing instance first (avoids restart-loop deadlocks)."""
+    # A gateway started from under pytest against the operator's real home replaces the live one
+    # (``--replace`` takeover, then the service manager relaunches it). Fail before any side effect.
+    from gateway.control_socket import _refuse_production_home_under_test
+    _refuse_production_home_under_test(get_hermes_home(), "gateway run")
+
     # Set here (not at import) so incidental gateway.run imports from CLI code don't poison it.
     os.environ["HERMES_EXEC_ASK"] = "1"
 

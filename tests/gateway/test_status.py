@@ -242,10 +242,21 @@ class TestGatewayRuntimeStatus:
         original = {"gateway_state": "running", "sentinel": "preserve"}
         state_path.write_text(json.dumps(original), encoding="utf-8")
 
+        # The guard keys on the passwd-derived production root (immune to Path.home patches,
+        # which upstream tests use for sandbox homes); point that at the stand-in here.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(
+            "hermes_state_guard._real_platform_state_root", lambda: production_home.resolve()
+        )
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setenv("HERMES_TEST_ISOLATION", str(tmp_path / "test-home"))
 
+        with pytest.raises(RuntimeError, match="test isolation"):
+            status.write_runtime_status(gateway_state="stopped")
+
+        # An env rebuild that also drops the marker must not disarm the guard: pytest ancestry
+        # (or PYTEST_CURRENT_TEST, still set here) keeps the process in test context.
+        monkeypatch.delenv("HERMES_TEST_ISOLATION", raising=False)
         with pytest.raises(RuntimeError, match="test isolation"):
             status.write_runtime_status(gateway_state="stopped")
 

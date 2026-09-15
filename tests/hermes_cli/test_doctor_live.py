@@ -148,8 +148,7 @@ class TestConfiguredOnlySelection:
 
     def test_disabled_mcp_server_is_skipped(self, monkeypatch):
         monkeypatch.setattr(
-            doctor_live,
-            "_load_config",
+            "hermes_cli.config.load_config_readonly",
             lambda: {"mcp_servers": {
                 "disabled": {"url": "https://x", "enabled": False},
                 "enabled": {"url": "https://y"},
@@ -219,7 +218,7 @@ class TestBrowserProbe:
     def test_uses_agent_browser_cli_and_cleans_private_session(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            "tools.browser_tool._find_agent_browser",
+            "tools.browser_tool_install._find_agent_browser",
             lambda **_kwargs: "/usr/local/bin/agent-browser",
         )
 
@@ -243,7 +242,7 @@ class TestBrowserProbe:
     def test_cli_failure_is_reported_and_cleanup_still_runs(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            "tools.browser_tool._find_agent_browser",
+            "tools.browser_tool_install._find_agent_browser",
             lambda **_kwargs: "agent-browser",
         )
 

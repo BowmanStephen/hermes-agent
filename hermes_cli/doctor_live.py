@@ -80,7 +80,7 @@ def _launch_browser_probe(timeout: float) -> tuple:
     broken even when the real browser path works.
     """
     try:
-        from tools.browser_tool import _find_agent_browser
+        from tools.browser_tool_install import _find_agent_browser
         resolved = _find_agent_browser(validate=False)
         # Either an executable path or the lazy-resolution sentinel; keep a path as ONE argv item so an
         # install under a directory containing spaces still works.

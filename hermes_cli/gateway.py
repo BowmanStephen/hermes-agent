@@ -2164,7 +2164,8 @@ def _systemd_unit_paths_for_service(service_name: str) -> tuple[Path, Path]:
     """Return user- then system-scope paths for a specific systemd service."""
     return (
         Path.home() / ".config" / "systemd" / "user" / f"{service_name}.service",
-        _SYSTEM_UNIT_DIR / f"{service_name}.service",
+        # Literal path (not _SYSTEM_UNIT_DIR): the service-identity tests stub ``Path`` to redirect it.
+        Path("/etc/systemd/system") / f"{service_name}.service",
     )
 
 

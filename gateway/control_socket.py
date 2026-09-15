@@ -275,10 +275,11 @@ def _refuse_production_home_under_test(home: Path, verb: str) -> None:
     if os.environ.get("HERMES_STATE_DB_GUARD_BYPASS") == "1":
         return
     try:
-        from hermes_state_guard import _in_test_context, _real_platform_state_root
+        from gateway.status import _in_test_process
+        from hermes_state_guard import _real_platform_state_root
     except Exception:
         return
-    if not _in_test_context():
+    if not _in_test_process():
         return
     root = _real_platform_state_root()
     try:

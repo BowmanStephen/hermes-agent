@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import patch
 
 from gateway import status
 
@@ -254,11 +255,12 @@ class TestGatewayRuntimeStatus:
         with pytest.raises(RuntimeError, match="test isolation"):
             status.write_runtime_status(gateway_state="stopped")
 
-        # An env rebuild that also drops the marker must not disarm the guard: pytest ancestry
-        # (or PYTEST_CURRENT_TEST, still set here) keeps the process in test context.
-        monkeypatch.delenv("HERMES_TEST_ISOLATION", raising=False)
-        with pytest.raises(RuntimeError, match="test isolation"):
-            status.write_runtime_status(gateway_state="stopped")
+        # A full env rebuild (clear=True drops HERMES_HOME, the marker and PYTEST_*) must not
+        # disarm the guard: the loaded pytest module still marks this as a test process.
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(RuntimeError, match="test isolation"):
+                status.write_runtime_status(gateway_state="stopped")
+        assert json.loads(state_path.read_text(encoding="utf-8")) == original
 
         assert json.loads(state_path.read_text(encoding="utf-8")) == original
 

@@ -166,6 +166,23 @@ def _get_runtime_status_path() -> Path:
     return _get_process_hermes_home() / _RUNTIME_STATUS_FILE
 
 
+def _in_test_process() -> bool:
+    """True inside a pytest run, even after a test rebuilt ``os.environ`` with ``clear=True``.
+
+    ``hermes_state_guard._in_test_context()`` checks the env marker and then pytest *ancestry*; the
+    pytest process itself has no pytest parent under a per-file runner, so with the env wiped both
+    signals are gone (that is how ``tests/gateway/test_feishu.py`` wrote the live state file twice
+    on 2026-09-15). A loaded ``pytest`` module cannot be cleared away, so it is the third signal.
+    """
+    if "pytest" in sys.modules:
+        return True
+    try:
+        from hermes_state_guard import _in_test_context
+    except Exception:
+        return bool(os.environ.get("HERMES_TEST_ISOLATION"))
+    return _in_test_context()
+
+
 def _ensure_runtime_status_write_is_isolated(home: Path) -> None:
     """Refuse status writes into the real production root from a test process.
 
@@ -182,13 +199,13 @@ def _ensure_runtime_status_write_is_isolated(home: Path) -> None:
     if os.environ.get("HERMES_STATE_DB_GUARD_BYPASS") == "1":
         return
     try:
-        from hermes_state_guard import _in_test_context, _real_platform_state_root
+        from hermes_state_guard import _real_platform_state_root
     except Exception:
         if not os.environ.get("HERMES_TEST_ISOLATION"):
             return
         production_home = _get_platform_default_hermes_home()
     else:
-        if not _in_test_context():
+        if not _in_test_process():
             return
         production_home = _real_platform_state_root()
     try:

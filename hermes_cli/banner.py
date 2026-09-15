@@ -169,6 +169,44 @@ def _is_official_ssh_remote(url: str | None) -> bool:
         _canonical_github_remote(url) == _OFFICIAL_REPO_CANONICAL)
 
 
+# The two helpers below are consumed by ``hermes_cli.update_cmd`` (its fetch still passes
+# ``--depth 1`` whenever ``--is-shallow-repository`` says so). This module's own passive
+# update check no longer fetches at all, so it does not use them.
+def _running_under_pytest() -> bool:
+    """True when this process (or a parent test process) is a pytest run.
+
+    Deliberately env-based and not a fixture: pytest exports these into the
+    environment, so a subprocess a test spawns inherits them and is covered
+    too. Mirrors ``hermes_state._running_under_pytest``.
+    """
+    return bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("PYTEST_VERSION")
+        or os.environ.get("HERMES_TEST_ISOLATION")
+    )
+
+
+#: A genuine installer checkout (``git clone --depth 1``) has a one-commit
+#: history. Anything meaningfully deeper is a real clone that happens to carry
+#: a stale shallow boundary, and must never be depth-fetched.
+_SHALLOW_STUB_MAX_COMMITS = 2
+
+
+def _local_history_is_deep(repo_dir: Path) -> bool:
+    """True when HEAD has real history behind it, despite a shallow marker.
+
+    Returns False when the depth can't be determined, so an unreadable repo
+    keeps the historical behaviour rather than silently changing fetch shape.
+    """
+    counted = _git_stdout(
+        ["rev-list", "--count", f"HEAD~{_SHALLOW_STUB_MAX_COMMITS}..HEAD"],
+        cwd=repo_dir,
+    )
+    # `HEAD~N` fails on a genuine stub (no such ancestor) — that is the signal
+    # for "really shallow", not an error worth reporting.
+    return bool(counted) and counted.isdigit()
+
+
 _GIT_TEXT_KW = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 

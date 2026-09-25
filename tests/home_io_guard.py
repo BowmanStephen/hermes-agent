@@ -11,6 +11,8 @@ import sqlite3
 import sys
 import threading
 
+from hermes_constants import _get_platform_default_hermes_home
+
 _INTERPRETER_PREFIXES = tuple({
     Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 } | {
@@ -24,6 +26,15 @@ _INTERPRETER_PREFIXES = tuple({
     # checkout's own .venv is not Hermes state; without this every run from a default install
     # trips on its first traceback.
     Path(__file__).resolve().parent.parent,
+} | {
+    # The default install's managed interpreter. Its venv is the interpreter's installation, not
+    # Hermes state, and it trades code with the dev checkout's venv (PM-era activation,
+    # entry-point probing, mtime-preserving venv syncs), so its paths reach sessions it never
+    # ran in: pytest's assertion-rewrite cache bakes co_filenames into tagged .pyc files, and a
+    # venv synced across installs made every failing async test render a frame pointing at this
+    # tree (often at files that no longer exist). Only the venv subtree is interpreter —
+    # config.yaml, state.db, logs, auth.json, and the checkout's non-venv files stay refused.
+    _get_platform_default_hermes_home() / "hermes-agent" / "venv",
 })
 
 

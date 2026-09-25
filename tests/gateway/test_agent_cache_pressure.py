@@ -499,24 +499,38 @@ class TestSalvageFollowups:
     def test_soft_release_closes_memory_provider_owned_aiohttp_session(self):
         """Evicting an AIAgent must close resources owned by its memory manager.
 
-        Hindsight owns one aiohttp ClientSession per cached AIAgent. A soft
+        A memory provider owns one aiohttp ClientSession per cached AIAgent. A soft
         cache eviction permanently drops that agent, so preserving tool state
         must not strand the manager's network session for garbage collection.
+        The bundled hindsight provider moved to the plugin catalog (upstream
+        4cbf862abe), so the in-tree contract is pinned with a provider stub:
+        _release_evicted_agent_soft must reach MemoryManager.shutdown_all(),
+        whose provider shutdown() closes the owned session.
         """
+        import asyncio
+
         import aiohttp
 
         from agent.memory_manager import MemoryManager
         from gateway.run import GatewayRunner
-        from plugins.memory.hindsight import HindsightMemoryProvider
 
-        class AiohttpOwningClient:
-            session = None
+        class AiohttpOwningProvider:
+            """Shape of a catalog memory provider (e.g. hindsight): owns one
+            ClientSession and closes it from shutdown()."""
+
+            def __init__(self):
+                self.session = None
+                self.loop = None
+                self.shutdown_calls = 0
 
             async def open(self):
+                self.loop = asyncio.get_running_loop()
                 self.session = aiohttp.ClientSession()
 
-            async def aclose(self):
-                await self.session.close()
+            def shutdown(self):
+                self.shutdown_calls += 1
+                if self.session is not None and not self.session.closed:
+                    self.loop.run_until_complete(self.session.close())
 
         class Agent:
             def __init__(self, memory_manager):
@@ -527,21 +541,22 @@ class TestSalvageFollowups:
             def release_clients(self):
                 pass
 
-        provider = HindsightMemoryProvider()
-        provider._mode = "local_external"
-        client = AiohttpOwningClient()
-        provider._client = client
-        provider._run_sync(client.open())
-
-        manager = MemoryManager()
-        manager._providers = [provider]
-        runner = GatewayRunner.__new__(GatewayRunner)
-
+        provider = AiohttpOwningProvider()
+        loop = asyncio.new_event_loop()
         try:
+            loop.run_until_complete(provider.open())
+
+            manager = MemoryManager()
+            manager._providers = [provider]
+            runner = GatewayRunner.__new__(GatewayRunner)
+
             runner._release_evicted_agent_soft(Agent(manager))
-            assert client.session.closed
+            assert provider.shutdown_calls == 1
+            assert provider.session.closed
         finally:
-            provider.shutdown()
+            if provider.session is not None and not provider.session.closed:
+                loop.run_until_complete(provider.session.close())
+            loop.close()
 
     def test_no_evictable_warning_distinguishes_unflushed_persistence(self, monkeypatch, caplog):
         """When everything is blocked on un-flushed persistence (e.g. the

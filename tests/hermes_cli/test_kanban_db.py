@@ -1984,7 +1984,8 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 
 def test_crash_records_the_reason_from_the_worker_log(kanban_home, monkeypatch):
     """A nonzero worker exit carries its log's error line into
-    ``last_failure_error`` and the ``crashed`` event payload."""
+    ``last_failure_error`` and the ``crashed`` event payload
+    (``worker_output`` — ``_classify_dead_worker`` folds it in)."""
     import hermes_cli.kanban_db as _kb
 
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
@@ -2016,7 +2017,7 @@ def test_crash_records_the_reason_from_the_worker_log(kanban_home, monkeypatch):
         event = next(
             e for e in kb.list_events(conn, tid) if e.kind == "crashed"
         )
-        assert event.payload["reason"] == "Error: Unknown skill(s): humanizer"
+        assert event.payload["worker_output"] == "Error: Unknown skill(s): humanizer"
 
 
 def test_crash_without_a_readable_log_still_records_the_exit(

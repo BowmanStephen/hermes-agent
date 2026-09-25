@@ -54,12 +54,13 @@ interface LoadOptions {
   /** Agent package whose desktop half this is (unified packages). */
   packageName?: string
   packageOrigin?: PackageMarker['origin']
-  /** Suppress the user-facing error while a disk write is being retried. */
-  reportErrors?: boolean
 }
 
 /** Live runtime plugins: id -> disposers (unload/reload support). */
 const loaded = new Map<string, (() => void)[]>()
+
+/** Settle-before-import (disk door): how many read PAIRS a hot-edited entry
+ *  file gets, and how long the loader waits between pairs for the writer. */
 const DISK_LOAD_ATTEMPTS = 3
 const DISK_SETTLE_DELAY_MS = 25
 
@@ -402,20 +403,18 @@ export async function loadRuntimePlugin(
 
     return plugin.id
   } catch (error) {
-    if (options.reportErrors !== false) {
-      console.error(`[plugins] runtime load failed (${origin})`, error)
-      notifyError(error, `Plugin "${origin}" failed to load`)
-      publishPlugin({
-        id: origin,
-        name: origin,
-        kind: options.kind ?? 'disk',
-        file: options.file,
-        packageName: options.packageName,
-        packageOrigin: options.packageOrigin,
-        status: 'error',
-        error: error instanceof Error ? error.message : String(error)
-      })
-    }
+    console.error(`[plugins] runtime load failed (${origin})`, error)
+    notifyError(error, `Plugin "${origin}" failed to load`)
+    publishPlugin({
+      id: origin,
+      name: origin,
+      kind: options.kind ?? 'disk',
+      file: options.file,
+      packageName: options.packageName,
+      packageOrigin: options.packageOrigin,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error)
+    })
 
     return null
   }
@@ -531,10 +530,6 @@ function dropOriginRecord(origin: string, except: DiskPlugin): void {
   dropPlugin(origin)
 }
 
-function waitForDiskWrite(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, DISK_SETTLE_DELAY_MS))
-}
-
 /** A plugin source that could not be read in FULL. Evaluating a truncated
  *  file is never acceptable — half a module can still parse. */
 class PluginSourceOversizeError extends Error {}
@@ -561,23 +556,34 @@ async function readPluginSourceText(file: string): Promise<string> {
   return result.text
 }
 
-/**
- * A file watcher can fire after truncate but before the writer has finished
- * replacing plugin.js. Require two identical FULL reads before handing source
- * to the ESM parser; otherwise a mid-save `<<<<<<<` or truncated string becomes
- * a noisy runtime syntax error even though the final file is valid.
- */
-async function readStablePluginSource(file: string, allowUnstable: boolean): Promise<null | string> {
-  const first = await readPluginSourceText(file)
+function waitForDiskWrite(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, DISK_SETTLE_DELAY_MS))
+}
 
-  await waitForDiskWrite()
+/** A watcher can fire after truncate but before the writer has finished
+ *  replacing plugin.js. Require two identical FULL reads before handing source
+ *  to the ESM parser; a mid-save `<<<<<<<` or truncated string would otherwise
+ *  become a noisy runtime syntax error even though the final file is valid.
+ *  Reads within a pair are back-to-back, so a settled file — the common case —
+ *  reaches the evaluator with no delay at all; only a mismatched pair waits
+ *  for the writer and takes a fresh pair, up to DISK_LOAD_ATTEMPTS. A pair
+ *  that never settles still evaluates its newest read: a genuinely broken
+ *  file must reach the error report instead of failing silently. */
+async function readStablePluginSource(file: string): Promise<string> {
+  let text = await readPluginSourceText(file)
 
-  const second = await readPluginSourceText(file)
+  for (let attempt = 1; attempt < DISK_LOAD_ATTEMPTS; attempt += 1) {
+    const next = await readPluginSourceText(file)
 
-  // On the final attempt, use the newest read even if the writer still has
-  // not settled. That preserves the final-attempt error report for a plugin
-  // that remains syntactically invalid instead of failing silently.
-  return first === second || allowUnstable ? second : null
+    if (next === text) {
+      return next
+    }
+
+    await waitForDiskWrite()
+    text = await readPluginSourceText(file)
+  }
+
+  return text
 }
 
 /** Returns false when the entry file could not be read (vanished mid-read) so
@@ -587,66 +593,32 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
   const prevId = entry.id
 
   try {
-    for (let attempt = 0; attempt < DISK_LOAD_ATTEMPTS; attempt += 1) {
-      const text = await readStablePluginSource(entry.file, attempt === DISK_LOAD_ATTEMPTS - 1)
+    const text = await readStablePluginSource(entry.file)
 
-      if (text === null) {
-        if (attempt < DISK_LOAD_ATTEMPTS - 1) {
-          await waitForDiskWrite()
-        }
+    const id = await loadRuntimePlugin(text, entry.origin, {
+      defaultEnabled: entry.defaultEnabled,
+      file: entry.file,
+      packageName: entry.packageName,
+      packageOrigin: entry.packageOrigin
+    })
 
-        continue
-      }
+    // loadRuntimePlugin only disposes the NEW id, so the previous incarnation
+    // is unloaded here when the file no longer yields it: a hot-edit that
+    // changes `plugin.id`, or a save that no longer loads at all (syntax
+    // error, timeout, duplicate). Otherwise the old module's contributions and
+    // its activate handle stay live beside the error row — the Plugins tab
+    // would show a broken file as "loaded" and re-enable stale code.
+    if (prevId && prevId !== id) {
+      unloadRuntimePlugin(prevId)
+      dropPlugin(prevId)
+    }
 
-      const id = await loadRuntimePlugin(text, entry.origin, {
-        defaultEnabled: entry.defaultEnabled,
-        file: entry.file,
-        packageName: entry.packageName,
-        packageOrigin: entry.packageOrigin,
-        reportErrors: attempt === DISK_LOAD_ATTEMPTS - 1
-      })
+    entry.id = id
 
-      if (!id) {
-        if (attempt < DISK_LOAD_ATTEMPTS - 1) {
-          await waitForDiskWrite()
-
-          continue
-        }
-
-        // The save no longer loads at all (syntax error, timeout, duplicate)
-        // and the retries are exhausted — loadRuntimePlugin reported it above.
-        // Unload the previous incarnation so its contributions and activate
-        // handle don't stay live beside the error row — the Plugins tab would
-        // show a broken file as "loaded" and re-enable stale code.
-        if (prevId) {
-          unloadRuntimePlugin(prevId)
-          dropPlugin(prevId)
-        }
-
-        entry.id = id
-
-        return true
-      }
-
-      // loadRuntimePlugin only disposes the NEW id, so the previous incarnation
-      // is unloaded here when the file no longer yields it: a hot-edit that
-      // changes `plugin.id`. Otherwise the old module's contributions and its
-      // activate handle stay live beside the error row — the Plugins tab would
-      // show a broken file as "loaded" and re-enable stale code.
-      if (prevId && prevId !== id) {
-        unloadRuntimePlugin(prevId)
-        dropPlugin(prevId)
-      }
-
-      entry.id = id
-
-      // A fixing save under a different plugin id — drop the folder-named
-      // error record so the inventory shows one row, not a ghost.
-      if (id !== entry.origin) {
-        dropOriginRecord(entry.origin, entry)
-      }
-
-      return true
+    // A fixing save under a different plugin id — drop the folder-named
+    // error record so the inventory shows one row, not a ghost.
+    if (id && id !== entry.origin) {
+      dropOriginRecord(entry.origin, entry)
     }
 
     return true

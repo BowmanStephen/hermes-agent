@@ -707,6 +707,74 @@ _GIT_CONFIG_READ_FLAGS = frozenset({
     "--list", "-l", "--show-origin", "--show-scope",
 })
 
+# ``git branch`` / ``git tag`` listing forms. A positional argument after ``branch`` CREATES
+# a branch and after ``tag`` CREATES a tag, and the -d/-D/-m/-M/-c/-C/-u/-a/-s families
+# mutate one, so anything outside these listing shapes stays refused. Upstream 0.21.5's
+# ``hermes_cli/version_info.py`` probes the checkout at import time (auth_constants →
+# get_version_info → every run_agent import) with ``git branch --show-current`` and
+# ``git tag --merged HEAD --list v[0-9]*`` — pure reads the guard must allow, not bypass.
+_GIT_LISTING_SHAPES = {
+    "branch": {
+        "mutation": frozenset({
+            "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
+            "-f", "--force", "-u", "--set-upstream", "--set-upstream-to",
+            "--track", "--edit-description",
+        }),
+        "listing": frozenset({
+            "--show-current", "--list", "-l", "-a", "--all", "-r", "--remotes",
+            "-v", "-vv", "--verbose", "--heads", "-i", "--ignore-case",
+            "--no-abbrev", "--no-color", "--no-column", "--no-track",
+        }),
+        "value": frozenset({
+            "--sort", "--format", "--color", "--column", "--columns", "--abbrev",
+            "--points-at", "--contains", "--no-contains", "--merged", "--no-merged",
+        }),
+    },
+    "tag": {
+        "mutation": frozenset({"-a", "-s", "-u", "-m", "-F", "-f", "-d", "-v", "--edit"}),
+        "listing": frozenset({
+            "-l", "--list", "-n", "-i", "--ignore-case", "--no-color", "--omit-empty",
+        }),
+        "value": frozenset({
+            "--sort", "--format", "--color", "--column", "--columns",
+            "--points-at", "--contains", "--no-contains", "--merged", "--no-merged",
+        }),
+    },
+}
+
+
+def _git_listing_argv_is_readonly(cmd, subcommand):
+    """True for ``git branch``/``git tag`` forms that only list (no create/move/delete).
+
+    Value flags consume the next token so a value is never mistaken for a name; a bare
+    positional is a PATTERN only once a listing flag has been seen, else it names the
+    branch/tag being created."""
+    shape = _GIT_LISTING_SHAPES[subcommand]
+    known_flags = shape["listing"] | shape["value"] | shape["mutation"]
+    parts = [os.fspath(part) for part in cmd]
+    rest = parts[parts.index(subcommand) + 1:]
+    listing_mode = False
+    expect_value = False
+    for arg in rest:
+        if expect_value:
+            expect_value = False
+            continue
+        if arg in shape["mutation"]:
+            return False
+        if arg in shape["value"]:
+            expect_value = True
+            continue
+        if arg in shape["listing"]:
+            listing_mode = True
+            continue
+        if arg.startswith("--") and "=" in arg and arg.split("=", 1)[0] in known_flags:
+            continue
+        if arg.startswith("-"):
+            return False  # unknown flag — stay conservative
+        if not listing_mode:
+            return False  # bare positional before any listing flag: a create
+    return True
+
 # Subcommands that act on a repository named by a positional argument rather
 # than on the one holding the cwd. ``git init /tmp/x`` and
 # ``git clone <src> /tmp/y`` both routinely run with the cwd inherited from
@@ -794,6 +862,8 @@ def _guard_git_argv(cmd, cwd):
             rest and rest[0] in {"get", "list"}
         ):
             return
+    if subcommand in _GIT_LISTING_SHAPES and _git_listing_argv_is_readonly(cmd, subcommand):
+        return
 
     try:
         resolved = target.expanduser().resolve()

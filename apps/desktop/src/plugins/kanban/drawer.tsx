@@ -1284,7 +1284,7 @@ export function TaskDrawer({
       </DialogContent>
 
       <ConfirmDialog
-        confirmLabel={k.deleteTask}
+        confirmLabel={k.delete}
         description={k.deleteConfirmBody}
         destructive
         onClose={() => setConfirmDelete(false)}

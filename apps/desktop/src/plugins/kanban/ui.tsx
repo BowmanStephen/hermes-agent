@@ -17,7 +17,7 @@ import {
 } from '@hermes/plugin-sdk'
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
-import { fetchOrchestration, fetchProfiles, ORCHESTRATION_KEY, PROFILES_KEY } from './api'
+import { fetchOrchestration, fetchProfiles, orchestrationKey, profilesKey, useKanbanScope } from './api'
 import { columnLabel, useKanban } from './i18n'
 import { columnMeta, type KanbanTask } from './types'
 
@@ -34,7 +34,9 @@ export const $newTaskLane = atom<null | string>(null)
 
 /** Orchestration knobs (cached app-wide; the settings panel invalidates). */
 export function useOrchestration() {
-  return useQuery({ queryKey: ORCHESTRATION_KEY, queryFn: fetchOrchestration, staleTime: 60_000 }).data
+  const scope = useKanbanScope()
+
+  return useQuery({ queryKey: orchestrationKey(scope), queryFn: fetchOrchestration, staleTime: 60_000 }).data
 }
 
 /** The dispatcher's configured fallback for unassigned ready cards
@@ -47,7 +49,8 @@ export function useDefaultAssignee(): string {
  *  spawn workers for. Null while the roster is loading, so callers can avoid
  *  flashing a false "not a profile" warning before the data exists. */
 export function useProfileNames(): null | Set<string> {
-  const { data } = useQuery({ queryKey: PROFILES_KEY, queryFn: fetchProfiles, staleTime: 60_000 })
+  const scope = useKanbanScope()
+  const { data } = useQuery({ queryKey: profilesKey(scope), queryFn: fetchProfiles, staleTime: 60_000 })
 
   return useMemo(() => (data ? new Set(data.profiles.map(profile => profile.name)) : null), [data])
 }
@@ -233,6 +236,21 @@ export function StatusMenu({
           ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+/** Priority as the board card shows it: an amber up-arrow + number when
+ *  raised, a muted bare number at 0. Shared by the card and the task modal. */
+export function PriorityGlyph({ priority }: { priority: number }) {
+  if (priority <= 0) {
+    return <span className="text-(--ui-text-quaternary)">{priority}</span>
+  }
+
+  return (
+    <span className="inline-flex items-center gap-0.5 text-amber-500">
+      <Codicon name="arrow-up" size="0.7rem" />
+      {priority}
+    </span>
   )
 }
 

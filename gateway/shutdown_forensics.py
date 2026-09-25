@@ -49,7 +49,8 @@ def _read_proc_field(pid: int, key: str) -> Optional[str]:
 
 
 def _proc_summary(pid: int) -> Dict[str, Any]:
-    """Compact /proc/<pid> snapshot (pid, ppid, state, uid, cmdline); missing fields omitted."""
+    """Compact /proc/<pid> identity (pid, name, state, ppid, uid). Never reads cmdline/argv —
+    those bytes are not safe to persist (tokens, URIs, ``-e KEY=`` overlays)."""
     summary: Dict[str, Any] = {"pid": pid}
     if pid <= 0:
         return summary
@@ -61,19 +62,13 @@ def _proc_summary(pid: int) -> Dict[str, Any]:
             summary["ppid"] = int(ppid)
     if (uid := _read_proc_field(pid, "Uid")) is not None:
         summary["uid"] = uid.split()[0] if uid else uid  # "real effective saved fs"
-    try:
-        data = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        data = b""
-    if data:  # truncate aggressively — these can be 4KB
-        summary["cmdline"] = data.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()[:300]
     return summary
 
 
 def _read_marker(path: Path) -> Optional[str]:
     """Return the marker file's text, or None if absent/unreadable."""
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
 
@@ -107,7 +102,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     # --replace instance is killing us". Filenames mirror gateway.status; literals keep the signal-
     # handler path import-light.
     with contextlib.suppress(Exception):  # noqa: BLE001 — never raise from a signal handler
-        hermes_home_str = os.environ.get("HERMES_HOME")
+        hermes_home_str = os.path.expanduser(os.environ.get("HERMES_HOME", ""))
         if hermes_home_str:
             raw = _read_marker(Path(hermes_home_str) / ".gateway-takeover.json")
             if raw is not None:
@@ -120,12 +115,48 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     return ctx
 
 
+def _async_diagnostic_script(signal_name: str, self_pid: int) -> str:
+    """POSIX listing used by the detached diagnostic. Columns are identity/resource only — no argv."""
+    return (
+        f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
+        "echo '--- date ---'; date -u +%Y-%m-%dT%H:%M:%SZ; "
+        "echo '--- ps (top 60 by cpu, comm only) ---'; "
+        # ``sort`` instead of GNU ``--sort=-pcpu`` so BSD ps (macOS) produces a listing too; the header
+        # line is echoed first so ``sort`` does not bury it among the 0.0-cpu rows.
+        "ps -eo pid,ppid,user,pcpu,pmem,stat,comm 2>/dev/null | { IFS= read -r h; echo \"$h\"; sort -nrk4; } | head -60; "
+        f"echo '--- pstree of self ---'; pstree -pl {self_pid} 2>/dev/null | head -40 || true; "
+        "echo '--- loadavg ---'; cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null || true; "
+        "echo '--- recent dmesg (oom/killed) ---'; "
+        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
+        "echo '=== end ==='"
+    )
+
+
+# macOS ships bash but not GNU ``timeout``. This short-lived supervisor keeps the detached
+# diagnostic bounded without a runtime dependency: it runs the script in its own process group
+# and SIGKILLs that group at the deadline (fork commit bccadc85b9).
+_TIMEOUT_SUPERVISOR_SCRIPT = (
+    "import os, signal, subprocess, sys\n"
+    "proc = subprocess.Popen(['bash', '-c', sys.argv[1]], "
+    "start_new_session=True)\n"
+    "try:\n"
+    "    proc.wait(timeout=float(sys.argv[2]))\n"
+    "except subprocess.TimeoutExpired:\n"
+    "    try:\n"
+    "        os.killpg(proc.pid, signal.SIGKILL)\n"
+    "    except (ProcessLookupError, OSError):\n"
+    "        pass\n"
+    "    proc.wait()\n"
+)
+
+
 def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
                            timeout_seconds: float = 5.0) -> Optional[int]:
     """Fire-and-forget ``ps``-style snapshot appended to ``log_path``: a detached subprocess (own
-    ``timeout`` so a wedged ``ps`` self-cleans) rather than a blocking ``ps aux`` in the signal
+    ``timeout`` so a wedged ``ps`` self-cleans) rather than a blocking process listing in the signal
     handler, which can freeze the loop >2s on a busy host. Returns the subprocess PID, or ``None``
     on failure / Windows (bash -c is available on every POSIX target; Windows has no ps anyway).
+    The listing is comm-only: full argv is not persisted.
     """
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,43 +164,23 @@ def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
         return None
     if sys.platform == "win32":
         return None
-    script = (
-        f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
-        "echo '--- date ---'; date -u +%Y-%m-%dT%H:%M:%SZ; "
-        "echo '--- ps auxf (top 60 by cpu) ---'; ps auxf --sort=-pcpu 2>/dev/null | head -60; "
-        f"echo '--- pstree of self ---'; pstree -plau {os.getpid()} 2>/dev/null | head -40 || true; "
-        "echo '--- /proc/loadavg ---'; cat /proc/loadavg 2>/dev/null || true; "
-        "echo '--- recent dmesg (oom/killed) ---'; "
-        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
-        "echo '=== end ==='"
-    )
-    timeout_command = shutil.which("timeout") or shutil.which("gtimeout")
-    if timeout_command:
-        diagnostic_argv = [timeout_command, f"{timeout_seconds:.0f}", "bash", "-c", script]
-    else:
-        # macOS ships bash but not GNU ``timeout``. Keep the diagnostic bounded without a runtime
-        # dependency: a short-lived Python supervisor runs the shell in its own process group and
-        # kills that group if it exceeds the requested deadline.
-        timeout_helper = (
-            "import os, signal, subprocess, sys\n"
-            "proc = subprocess.Popen(['bash', '-c', sys.argv[1]], "
-            "start_new_session=True)\n"
-            "try:\n"
-            "    proc.wait(timeout=float(sys.argv[2]))\n"
-            "except subprocess.TimeoutExpired:\n"
-            "    try:\n"
-            "        os.killpg(proc.pid, signal.SIGKILL)\n"
-            "    except (ProcessLookupError, OSError):\n"
-            "        pass\n"
-            "    proc.wait()\n"
-        )
-        diagnostic_argv = [
-            sys.executable, "-c", timeout_helper, script, str(max(0.0, timeout_seconds)),
-        ]
+    script = _async_diagnostic_script(signal_name, os.getpid())
     try:  # O_APPEND so concurrent diagnostics from rapid signals don't trample each other
-        fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     except OSError:
         return None
+    with contextlib.suppress(OSError):  # tighten logs created 0644 by earlier releases
+        os.fchmod(fd, 0o600)
+    # GNU ``timeout`` (Homebrew: ``gtimeout``) is absent from stock macOS; without it a short-lived
+    # Python supervisor (own process group, SIGKILL at the deadline) bounds the detached script so a
+    # wedged ``ps`` still self-cleans within ``timeout_seconds``.
+    timeout_bin = shutil.which("timeout") or shutil.which("gtimeout")
+    if timeout_bin:
+        diagnostic_argv = [timeout_bin, f"{timeout_seconds:.0f}", "bash", "-c", script]
+    else:
+        diagnostic_argv = [
+            sys.executable, "-c", _TIMEOUT_SUPERVISOR_SCRIPT, script, str(max(0.0, timeout_seconds)),
+        ]
     try:  # start_new_session: outlive systemd killing our cgroup (KillMode=control-group) to flush
         return subprocess.Popen(
             diagnostic_argv, stdout=fd,
@@ -183,11 +194,8 @@ def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
 
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:
-    """Render a shutdown context dict as one scannable log line (parent cmdline is key)."""
-    from agent.redact import redact_command_line
-
+    """Render a shutdown context dict as one scannable log line (parent identity, never argv)."""
     parent = ctx.get("parent") or {}
-    parent_cmd = redact_command_line(parent.get("cmdline", "(unknown)"))
     load_str = f"{load:.2f}" if isinstance(load := ctx.get("loadavg_1m"), (int, float)) else "?"
     extras: List[str] = []
     if ctx.get("takeover_marker") is not None:
@@ -201,7 +209,7 @@ def format_context_for_log(ctx: Dict[str, Any]) -> str:
     return (
         f"signal={ctx.get('signal', '?')} under_systemd={'yes' if ctx.get('under_systemd') else 'no'} "
         f"parent_pid={parent.get('pid') or '?'} parent_name={parent.get('name') or '?'} "
-        f"loadavg_1m={load_str}{extras_str} parent_cmdline={parent_cmd!r}"
+        f"loadavg_1m={load_str}{extras_str}"
     )
 
 

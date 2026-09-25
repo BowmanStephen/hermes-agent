@@ -105,7 +105,10 @@ def test_codex_usage_falls_back_to_native_credential_pool(monkeypatch, codex_usa
         runtime_api_key="pooled-token",
         runtime_base_url="https://chatgpt.com/backend-api/codex",
     )
-    pool = SimpleNamespace(select=lambda: pool_entry)
+    # Tier 3 asks has_credentials() before select() so an entry-less pool
+    # (no Codex login — the quota poller's every-cycle case) stays off the
+    # pool's "no available entries" log path.
+    pool = SimpleNamespace(has_credentials=lambda: True, select=lambda: pool_entry)
 
     import agent.credential_pool as credential_pool
 

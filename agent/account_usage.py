@@ -359,7 +359,14 @@ def _resolve_codex_usage_credentials(
         logger.debug("codex ▸ /usage runtime resolver returned no creds; trying pool", exc_info=True)
     # Tier 3: pool credentials have no account_id concept → header omitted.
     from agent.credential_pool import load_pool
-    entry = load_pool("openai-codex").select()
+
+    pool = load_pool("openai-codex")
+    # has_credentials() first: select() on an entry-less pool emits the pool's
+    # "no available entries" INFO line, and the quota poller reaches this tier
+    # every cycle when Codex has no login — each poll builds a fresh pool, so
+    # the pool's own throttle never engages. Contract is unchanged: no usable
+    # entry → the same RuntimeError the outer guard fails open on.
+    entry = pool.select() if pool.has_credentials() else None
     if entry is None:
         raise RuntimeError("No available openai-codex credential in credential pool")
     return entry.runtime_api_key, str(entry.runtime_base_url or base_url or "").strip(), None

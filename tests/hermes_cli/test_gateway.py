@@ -1059,7 +1059,12 @@ class TestReaperCandidateIsSupervisorOwned:
 
         killed_pids = []
         monkeypatch.setattr(gateway.os, "kill", lambda pid, sig: killed_pids.append((pid, sig)))
-        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+        # Upstream 0.21.5 Windows semantics: the reaper never os.kill(SIGTERM)s on Windows
+        # (SIGTERM = TerminateProcess); it marks the orphan and lets the bounded survivor wait
+        # escalate to SIGKILL. Simulate the wedged orphan (start time pinned, still alive after
+        # the grace wait) so the escalation fires; the stubbed sleep/monotonic keep it instant.
+        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: pid == orphan_pid)
+        monkeypatch.setattr("gateway.status.get_process_start_time", lambda pid: 1000.0)
         monkeypatch.setattr("gateway.status.write_planned_stop_marker", lambda pid: None)
         monkeypatch.setattr("time.sleep", lambda _: None)
         monkeypatch.setattr("time.monotonic", lambda: 1.0)
@@ -1224,7 +1229,13 @@ class TestWindowsScheduledTaskSupervisorGuard:
         )
         killed_pids = []
         monkeypatch.setattr(gateway.os, "kill", lambda pid, sig: killed_pids.append((pid, sig)))
-        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+        # Upstream 0.21.5 Windows semantics: os.kill(SIGTERM) maps to TerminateProcess, so the
+        # reaper must NOT signal on Windows — it writes the planned-stop marker and lets the
+        # bounded survivor wait escalate to SIGKILL. Simulate a wedged orphan (start time
+        # pinned, still alive throughout the grace wait) so the escalation fires; the stubbed
+        # sleep/monotonic keep that wait instantaneous.
+        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: pid == orphan_pid)
+        monkeypatch.setattr("gateway.status.get_process_start_time", lambda pid: 1000.0)
         monkeypatch.setattr("gateway.status.write_planned_stop_marker", lambda pid: None)
         monkeypatch.setattr("time.sleep", lambda _: None)
         monkeypatch.setattr("time.monotonic", lambda: 1.0)

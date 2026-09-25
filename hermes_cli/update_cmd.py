@@ -565,6 +565,19 @@ def _source_update_channel(args=None, *, channel=None, branch_explicit=False) ->
     return resolve_update_channel(config, _m().PROJECT_ROOT)
 
 
+def _root_is_running_checkout(root) -> bool:
+    """True when *root* IS the checkout this code is running from.
+
+    The fork's pytest depth-fetch guard (3642b965d3) exists so a depth fetch can never
+    truncate the developer's own history; a repo a test built under tmp_path is not that
+    checkout, so the guard must not fire there.
+    """
+    try:
+        return Path(root).resolve() == Path(__file__).resolve().parents[1]
+    except OSError:
+        return False
+
+
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False, channel=None):
     """Implement ``hermes update --check``: fetch and report without installing.
 
@@ -618,10 +631,13 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False, ch
     if is_shallow and _local_history_is_deep(root):
         is_shallow = False
     depth_args = ["--depth", "1"] if is_shallow else []
-    # Belt and braces: under pytest these fetches run against the developer's real checkout, and a
-    # test that reaches a real fetch at all is already escaping its mocks. The blast radius must not be
-    # their history. Env-based (see ``banner._running_under_pytest``) so subprocess children are covered.
-    if _running_under_pytest():
+    # Belt and braces: under pytest a depth fetch aimed at the developer's REAL checkout is how a
+    # full test run once truncated it (2026-08-19), and a test that reaches a real fetch at all is
+    # already escaping its mocks. The blast radius must not be their history. Env-based (see
+    # ``banner._running_under_pytest``) so subprocess children are covered. Scoped to the checkout
+    # this code runs from: a repo a test built under tmp_path is not that checkout, and upstream's
+    # own tests (test_shallow_graft_prune) exercise the real --depth 1 fetch + graft prune on those.
+    if _running_under_pytest() and _root_is_running_checkout(root):
         depth_args = []
     fetch_result, compare_branch = _check.fetch_compare_branch(git_cmd, root, branch, depth_args)
     if fetch_result.returncode != 0:

@@ -793,7 +793,16 @@ def _git_invocation_target(cmd, cwd):
     if not parts or Path(parts[0]).name not in {"git", "git.exe"}:
         return None
 
-    target = Path(cwd) if cwd is not None else Path.cwd()
+    if cwd is not None:
+        target = Path(cwd)
+    else:
+        try:
+            target = Path.cwd()
+        except OSError:
+            # The test process's cwd was deleted (upstream #33774: deferred parent cleanup
+            # runs after a child's scratch dir was rmtree'd). A dead cwd attributes nothing,
+            # so start with no target; an explicit ``-C``/``--git-dir`` below still pins one.
+            target = None
     subcommand = None
     expect_dir = False
     expect_value = False

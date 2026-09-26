@@ -119,6 +119,7 @@ test('getPendingStop exposes the draining stop and clears once it settles', asyn
   assert.ok(state.attachProcess(attempt, { id: 'current' }))
 
   const gate = deferred<void>()
+
   const stopping = state.stopProcess(async () => {
     await gate.promise
   })

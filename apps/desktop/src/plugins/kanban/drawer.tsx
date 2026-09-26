@@ -262,9 +262,7 @@ function Diagnostics({
       {items.map(diag => {
         const tone = SEVERITY_TONE[diag.severity]
 
-        const actions = diag.actions.filter(action =>
-          ['cli_hint', 'comment', 'reclaim'].includes(action.kind)
-        )
+        const actions = diag.actions.filter(action => ['cli_hint', 'comment', 'reclaim'].includes(action.kind))
 
         return (
           <Callout
@@ -1128,10 +1126,7 @@ export function TaskDrawer({
                       <Codicon name="archive" size="0.85rem" />
                       {k.archive}
                     </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-destructive"
-                      onSelect={() => setConfirmDelete(true)}
-                    >
+                    <DropdownMenuItem className="text-destructive" onSelect={() => setConfirmDelete(true)}>
                       <Codicon name="trash" size="0.85rem" />
                       {k.delete}
                     </DropdownMenuItem>

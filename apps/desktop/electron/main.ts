@@ -12213,6 +12213,12 @@ function releaseHostSpawnReservation() {
   hostSpawnReservation = null
 }
 
+// A deliberate stop drains through backendConnectionState.stopProcess (SIGTERM,
+// bounded exit wait). Starts that arrive inside that window queue behind it
+// instead of failing; past this bound — above the lifecycle's own 7s teardown
+// budget — the start surfaces startAttempt()'s own "has not stopped" error.
+const PRIMARY_STOP_DRAIN_TIMEOUT_MS = 10_000
+
 function startHermes({ supervisorRecovery = false }: { supervisorRecovery?: boolean } = {}): Promise<Awaited<ReturnType<typeof backendConnectionState.getPromise>>> {
   primaryRecoverySuppressed = false
   primaryStartsInFlight += 1
@@ -12370,6 +12376,27 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
     error.isBootstrapFailure = true
     bootstrapFailure = error
     throw error
+  }
+
+  // Serialize starts behind an in-flight stop: startAttempt() refuses while
+  // stopProcess is still draining, and both the renderer's proxied API calls
+  // and the supervisor's stale-exit respawn can land inside that window (a
+  // hermes:// deeplink focus produced /api/profiles + /api/status failures and
+  // a supervisor respawn that burned a recovery slot on the same refusal
+  // before its budgeted retry succeeded). Waiting — bounded — lets the same
+  // start proceed once the dying child settles. waitForTeardown allSettles, so
+  // a failed stop resolves the wait and startAttempt() re-raises its own
+  // error, as before. Concurrent waiters still dedup: setPromise publishes in
+  // the same synchronous block as startAttempt, so the first resumer wins and
+  // the rest return its promise at the getPromise() check below.
+  const pendingStop = backendConnectionState.getPendingStop()
+
+  if (pendingStop) {
+    await waitForTeardown([pendingStop], PRIMARY_STOP_DRAIN_TIMEOUT_MS)
+    // The wait can span the whole 10s drain: re-assert the same lifecycle boundary the
+    // top-of-function check used, so a quit that landed mid-drain stops here instead of
+    // migrating profiles and minting a start attempt.
+    localBackendLifecycle.assertCanStart()
   }
 
   const existingConnectionPromise = backendConnectionState.getPromise()

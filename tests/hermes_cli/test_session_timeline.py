@@ -171,6 +171,110 @@ def test_exact_owner_lineage_validation_and_bounded_jump(timeline_store):
     assert client.get(f"/api/sessions/{sid}/messages/around?row_id={row_id}").status_code == 404
 
 
+def test_live_unpersisted_transcript_reads_return_marker_page_not_404(timeline_store, monkeypatch):
+    """A session the in-process gateway holds live while the store has no row for it (the
+    Desktop's transcript read races the first flush) gets a well-formed EMPTY page with the
+    ``unpersisted_live`` marker on both /timeline and /messages; an id the gateway does not
+    know keeps the 404 gone-signal."""
+    import sys
+    import types
+
+    db, client, _ = timeline_store
+    # SimpleNamespace stands in for the module; the globals the tests/conftest.py
+    # autouse snapshot/teardown reads must exist so the swap stays teardown-safe.
+    fake_gateway = types.SimpleNamespace(
+        _sessions={"rt-1": {"session_key": "live-unpersisted"}},
+        _find_live_session_by_key=lambda key, profile_home=None: ("rt-1", {}) if key == "live-unpersisted" else None,
+        _close_session_by_id=lambda sid, end_reason="": None,
+        _methods={}, _cfg_cache=None, _cfg_sig=None, _cfg_path=None,
+        _db=None, _db_error=None, _real_stdout=sys.stdout)
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", fake_gateway)
+
+    timeline = client.get("/api/sessions/live-unpersisted/timeline")
+    assert timeline.status_code == 200
+    page = timeline.json()
+    assert page["session_state"] == "unpersisted_live"
+    assert page["entries"] == []
+    assert page["pagination"]["has_more"] is False
+    assert page["pagination"]["next_cursor"] is None
+
+    messages = client.get("/api/sessions/live-unpersisted/messages")
+    assert messages.status_code == 200
+    body = messages.json()
+    assert body["session_state"] == "unpersisted_live"
+    assert body["messages"] == []
+    assert body["pagination"]["returned"] == 0
+
+    # Unknown to both the store and the live runtime: the 404 stays.
+    assert client.get("/api/sessions/absent/timeline").status_code == 404
+    assert client.get("/api/sessions/absent/messages").status_code == 404
+
+
+def test_live_unpersisted_match_is_scoped_to_the_request_profile(timeline_store, monkeypatch):
+    """#100029 regression: a multiplex host keeps every served profile's runtimes in one
+    ``_sessions``, so the live-unpersisted check matches on the request's ``profile_home`` —
+    profile B's live session stays a 404 for a launch-profile request instead of an empty
+    marker page labeled with the wrong profile."""
+    import sys
+    import types
+
+    db, client, home = timeline_store
+    work = home / "profiles" / "work"
+    work.mkdir(parents=True)
+    with SessionDB(db_path=work / "state.db"):
+        pass  # store file must exist; the live id deliberately has no row in either store
+
+    def find_live(key, profile_home=None):
+        for sid, record in {"rt-b": {"session_key": "ts-100029", "profile_home": str(work)}}.items():
+            if record["session_key"] == key and (record.get("profile_home") or None) == (profile_home or None):
+                return sid, record
+        return None
+
+    fake_gateway = types.SimpleNamespace(
+        _sessions={"rt-b": {"session_key": "ts-100029", "profile_home": str(work)}},
+        _find_live_session_by_key=find_live,
+        _close_session_by_id=lambda sid, end_reason="": None,
+        _methods={}, _cfg_cache=None, _cfg_sig=None, _cfg_path=None,
+        _db=None, _db_error=None, _real_stdout=sys.stdout)
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", fake_gateway)
+
+    # The owning profile gets the marker page, by stored session_key and raw runtime id alike.
+    timeline = client.get("/api/sessions/ts-100029/timeline?profile=work")
+    assert timeline.status_code == 200
+    assert timeline.json()["session_state"] == "unpersisted_live"
+    assert timeline.json()["profile"] == "work"
+    assert client.get("/api/sessions/rt-b/messages?profile=work").json()["session_state"] == "unpersisted_live"
+
+    # The same ids without the profile (the launch store has no row for them) stay 404s.
+    assert client.get("/api/sessions/ts-100029/timeline").status_code == 404
+    assert client.get("/api/sessions/ts-100029/messages").status_code == 404
+    assert client.get("/api/sessions/rt-b/messages").status_code == 404
+
+
+def test_timeline_marker_fallback_requires_a_store_miss(timeline_store, monkeypatch):
+    """The unpersisted_live marker is only for ids no store row explains: a stored session whose
+    lineage successor fails the owner check also 404s out of _timeline_session_id, and it keeps
+    that 404 even when the gateway happens to hold the requested id live."""
+    import sys
+    import types
+
+    db, client, _ = timeline_store
+    db.end_session("timeline-root", end_reason="compression")
+    db.create_session(session_id="timeline-tip", source="desktop", parent_session_id="timeline-root")
+    db._write_sql("UPDATE sessions SET profile_name = 'wrong-owner' WHERE id = 'timeline-tip'")
+
+    fake_gateway = types.SimpleNamespace(
+        _sessions={"timeline-root": {"session_key": "timeline-root"}},
+        _find_live_session_by_key=lambda key, profile_home=None: ("timeline-root", {}) if key == "timeline-root" else None,
+        _close_session_by_id=lambda sid, end_reason="": None,
+        _methods={}, _cfg_cache=None, _cfg_sig=None, _cfg_path=None,
+        _db=None, _db_error=None, _real_stdout=sys.stdout)
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", fake_gateway)
+
+    # Pre-fix this answered an empty unpersisted_live page for a persisted session.
+    assert client.get("/api/sessions/timeline-root/timeline").status_code == 404
+
+
 def test_timeline_sql_never_reads_tool_columns_or_writes(timeline_store, monkeypatch):
     import sqlite3
     from contextlib import contextmanager

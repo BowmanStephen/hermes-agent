@@ -11,6 +11,7 @@ import json
 import re
 import sqlite3
 import time
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -39,6 +40,12 @@ _open_session_db_for_profile = late("_open_session_db_for_profile", "hermes_cli.
 _session_db_path_for_profile = late("_session_db_path_for_profile", "hermes_cli.web_server_sessions")
 
 _NOT_FOUND = "Session not found"
+
+# ``session_state`` marker on transcript reads: the id is live in the in-process gateway but has
+# no stored row yet (a just-opened chat whose first turn has not flushed) — a well-formed EMPTY
+# page, not a 404 the Desktop renders as an error. Ended rows (``end_reason`` set, e.g. the
+# startup orphan reap) are rows like any other and are served from the store normally.
+SESSION_STATE_UNPERSISTED_LIVE = "unpersisted_live"
 
 # CRITICAL — every literal-path route on ``manage_router`` MUST be declared
 # BEFORE the templated ``/api/sessions/{session_id}`` family. Starlette matches
@@ -166,6 +173,59 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
         # RuntimeError family, not sqlite3: same 503 payload as the analytics reads (#110054).
         with corrupt_store_as_status(db.db_path):
             raise
+
+
+def _live_match_profile_home(profile: Optional[str]) -> Optional[str]:
+    """The request's profile home as live gateway records stamp it — ``server._profile_home``
+    semantics: a served profile's directory, or None when the request names the serving
+    process's own home (a record with no ``profile_home`` is the launch profile's). The store
+    lookup resolves the same request through ``_cron_profile_home`` / ``get_hermes_home``, so
+    both sides of the live-match comparison see the same home."""
+    if not profile:
+        return None
+    _name, home = _cron_profile_home(profile)
+    from hermes_cli.config import get_hermes_home
+
+    return None if home.resolve() == Path(get_hermes_home()).resolve() else str(home)
+
+
+def _live_unpersisted_session_id(session_id: str, profile: Optional[str] = None) -> bool:
+    """True when the in-process gateway holds *session_id* as a live runtime of the REQUEST's
+    profile while that profile's store has no row for it. The Desktop reads the stored
+    transcript the moment a session opens, so without this check that read races the first
+    flush and 404s a session the user is looking at (both matches below are needed: the raw
+    runtime id and its stored ``session_key``). Only an already imported gateway module is
+    consulted (``web_server`` imports ``tui_gateway.server`` at startup, so the serving process
+    always has it): importing it here would run its import-time stdout redirect as a side
+    effect, and a webserver-only deployment has nothing live to consult — every miss there
+    stays a 404.
+
+    Profile-scoped like the store lookup around it (#100029): a multiplex host keeps every
+    served profile's runtimes in one ``_sessions`` and timestamp-based stored ids can exist in
+    several profiles' stores, so both branches match on the request's ``profile_home`` —
+    otherwise a profile-A request would read profile B's live session as its own empty page."""
+    import sys
+    gateway = sys.modules.get("tui_gateway.server")
+    if gateway is None:
+        return False
+    sessions = getattr(gateway, "_sessions", None)
+    if not isinstance(sessions, dict):
+        return False
+    profile_home = _live_match_profile_home(profile)
+    record = sessions.get(session_id)
+    if isinstance(record, dict):
+        matches = getattr(gateway, "_live_profile_matches", None)
+        profile_hit = (bool(matches(record, profile_home)) if matches is not None
+                       else (record.get("profile_home") or None) == profile_home)
+        if profile_hit:
+            return True
+    find_live = getattr(gateway, "_find_live_session_by_key", None)
+    if find_live is None:
+        return False
+    try:
+        return find_live(session_id, profile_home=profile_home) is not None
+    except Exception:
+        return False
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
@@ -627,6 +687,15 @@ async def get_session_messages(
 
     result = await asyncio.to_thread(_with_db, profile, _read, read_only=True)
     if result is None:
+        # Live-but-unpersisted (the Desktop reads the transcript while the first turn is still
+        # flushing): a well-formed empty page with the state marker, not an unhandled 404.
+        if _live_unpersisted_session_id(session_id, profile):
+            return {
+                "session_id": session_id, "profile": _serving_profile(profile),
+                "session_state": SESSION_STATE_UNPERSISTED_LIVE, "messages": [],
+                "pagination": {
+                    "limit": 500 if limit is None else min(limit, 500), "offset": offset,
+                    "order": order or ("latest" if limit is None else "oldest"), "returned": 0}}
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
     sid, _limit, messages = result
     projected_messages = await asyncio.to_thread(
@@ -673,7 +742,22 @@ async def get_session_timeline(
     owner = _serving_profile(profile)
 
     def _read(db):
-        sid = _timeline_session_id(db, session_id, owner)
+        try:
+            sid = _timeline_session_id(db, session_id, owner)
+        except HTTPException:
+            # Live-but-unpersisted (the Desktop opens the rail before the first turn flushes):
+            # a well-formed empty page with the state marker, not an unhandled 404. Only a raw
+            # id with no row in THIS store qualifies — a stored session whose lineage successor
+            # fails the owner check 404s out of _timeline_session_id too, and that must stay a
+            # 404 instead of an empty live page for a session the store actually has.
+            if (db._read_one("SELECT id FROM sessions WHERE id = ?", (session_id,)) is None
+                    and _live_unpersisted_session_id(session_id, profile)):
+                return {"session_id": session_id, "profile": owner,
+                        "session_state": SESSION_STATE_UNPERSISTED_LIVE, "entries": [],
+                        "pagination": {"limit": limit, "after_row_id": after_row_id,
+                                       "returned": 0, "total": 0, "has_more": False,
+                                       "next_cursor": None}}
+            raise
         return {"session_id": sid, "profile": owner,
                 **read_timeline(db, sid, limit=limit, after_row_id=after_row_id)}
 

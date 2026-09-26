@@ -375,7 +375,10 @@ class PluginContext:
         handle = self._manager._track_scoped_registration(
             self.manifest, kind, registry_name, registry, provider, previous
         )
-        logger.info("Plugin '%s' registered %s: %s", self.manifest.name, label, registry_name)
+        # DEBUG, not INFO: every discovery sweep re-runs register() (each fresh CLI process, every
+        # force reload), so ~45 provider lines per pass at INFO turned agent.log into per-pass noise
+        # during turn-time CLI bursts. Demoted with the sweep-complete line; see 2026-09-25 investigation.
+        logger.debug("Plugin '%s' registered %s: %s", self.manifest.name, label, registry_name)
         return handle
 
     @property
@@ -1427,8 +1430,13 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             self._validate_plugin_config_schema(manifest)
             self._load_plugin(manifest)
         if manifests:
-            logger.info("Plugin discovery complete: %d found, %d enabled", len(self._plugins),
-                        sum(1 for p in self._plugins.values() if p.enabled))
+            # DEBUG, not INFO: in a healthy process this fires once per (process, Hermes home) — the
+            # ``_discovered`` guard short-circuits every non-forced re-entry — but every fresh ``hermes``
+            # CLI process logs its own sweep, and each ``force=True`` reload logs again, so at INFO this
+            # line (plus the per-provider lines) spammed agent.log hundreds of times per day. See the
+            # 2026-09-25 discovery-spam investigation (449 lines in two days, bursts during agent turns).
+            logger.debug("Plugin discovery complete: %d found, %d enabled", len(self._plugins),
+                         sum(1 for p in self._plugins.values() if p.enabled))
         self._refresh_plugin_compat_report(list(to_load.values()))
 
     def _refresh_plugin_compat_report(self, manifests: List[PluginManifest]) -> None:

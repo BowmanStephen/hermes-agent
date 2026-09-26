@@ -1045,7 +1045,17 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
-        return err
+        # Gateway approval queues are memory-only (tools/approval ``_gateway_queues``): a runtime
+        # the gateway no longer holds (detached/reaped, gateway restart) cannot have pending
+        # approvals — the queue died with it, so the honest answer is "none pending". When the id
+        # still resolves in the STORED session DB, return the well-formed empty replay so the
+        # client clears its stale pending-approval card (replayPendingApproval diffs
+        # ``result.approvals`` against what it holds); an id unknown to the store keeps the 4001
+        # rejection, which is the client's session-gone signal. Stored-id second tier mirrors
+        # session.set_hidden.
+        if (err.get("error") or {}).get("code") != 4001 or not _stored_session_known(params):
+            return err
+        return _ok(rid, {"approvals": []})
     return _approval_reply(
         rid, "approvals", lambda a: a.list_gateway_approvals(session["session_key"]))
 
@@ -1221,6 +1231,22 @@ def _approval_reply(rid, result_key, call):
         return _ok(rid, {result_key: call(approval)})
     except Exception as e:
         return _err(rid, 5004, str(e))
+
+
+def _stored_session_known(params: dict) -> bool:
+    """Whether ``params['session_id']`` resolves to a row in the requested profile's stored
+    session DB — the quiet second tier for a detached/reaped runtime id (never a rejection of
+    its own; failures read as "unknown" and let the caller keep its error)."""
+    target = str(params.get("session_id") or "").strip()
+    if not target:
+        return False
+    try:
+        with _profile_db(params) as db:
+            resolve = getattr(db, "resolve_session_id", None) if db is not None else None
+            return bool(resolve is not None and resolve(target))
+    except Exception:
+        logger.debug("approval.pending stored-session lookup failed", exc_info=True)
+        return False
 
 
 def _approval_respond_session_fallback(params: dict):

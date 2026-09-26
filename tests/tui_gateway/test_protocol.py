@@ -519,6 +519,38 @@ def test_approval_pending_replays_unresolved_requests(server, monkeypatch):
     assert response["result"] == {"approvals": pending}
 
 
+def test_approval_pending_stored_id_without_runtime_answers_empty_replay(server, monkeypatch):
+    """A detached/reaped runtime id that still resolves in the STORED session DB gets the
+    well-formed empty replay: gateway approval queues are memory-only (tools/approval
+    ``_gateway_queues``), so "none pending" is the honest answer and the client clears its
+    stale card — a 4001 would leave it stuck on a dead pending-approval state."""
+    import contextlib
+
+    stored = types.SimpleNamespace(resolve_session_id=lambda target: "stored-key")
+    monkeypatch.setattr(server, "_profile_db", lambda params: contextlib.nullcontext(stored))
+
+    response = server.handle_request(
+        {"id": "r1", "method": "approval.pending", "params": {"session_id": "stored-key"}}
+    )
+
+    assert response["result"] == {"approvals": []}
+
+
+def test_approval_pending_unknown_id_keeps_4001(server, monkeypatch):
+    """An id unknown to BOTH the runtime and the stored DB keeps the 4001 rejection — that is
+    the client's session-gone signal (#100639), not something to soften."""
+    import contextlib
+
+    stored = types.SimpleNamespace(resolve_session_id=lambda target: None)
+    monkeypatch.setattr(server, "_profile_db", lambda params: contextlib.nullcontext(stored))
+
+    response = server.handle_request(
+        {"id": "r1", "method": "approval.pending", "params": {"session_id": "ghost"}}
+    )
+
+    assert response["error"]["code"] == 4001
+
+
 def test_approval_received_acknowledges_exact_request(server, monkeypatch):
     from tools import approval
 

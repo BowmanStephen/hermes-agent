@@ -438,10 +438,11 @@ fully replaced — `platforms` is the only host-gating marker in the tree.
 
 **Live Windows process-topology E2E: the `wine2e` lane.** Claims about real
 Windows process behavior that mocks cannot reproduce are proven by pushing
-probes to a `wine2e/**` branch, which runs the on-demand `windows-venv-e2e.yml`
-workflow (`tests/hermes_cli/test_venv_holder_windows_live.py` on a real
-`windows-latest` runner, driving the real detection code — no mocked psutil);
-iterate until the lane is green, then open the PR. Extend the live suite when
+probes to a `wine2e/**` branch — the lane fires only on such pushes (inert on
+PRs and main; costs nothing on normal work) — running the on-demand
+`windows-venv-e2e.yml` workflow (`tests/hermes_cli/test_venv_holder_windows_live.py`
+on a real `windows-latest` runner, driving the real detection code — no mocked
+psutil); iterate until the lane is green, then open the PR. Extend the live suite when
 touching that subsystem; assert against the gateway ANCESTOR found by argv,
 not the direct parent (the venv shim makes every spawn a launcher/worker
 chain).

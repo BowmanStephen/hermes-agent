@@ -337,13 +337,10 @@ isolated tool environments. Callers receive an interpreter or tool path, not uv.
 Nix's declarative uv2nix builds and unrelated user projects remain independently owned.
 
 The `[tool.uv] exclude-newer = "14 days"` quarantine covers **Hermes's own dependencies only**
-(every registry package in core's `uv.lock`). Plugin `python_dependencies` follow the plugin's own
-policy: when PM generates the plugin workspace (`pm/workspace.py::_core_release_quarantine`) the
-global cutoff moves onto each core-locked package, so plugin-only packages are not filtered and a
-plugin still cannot drag a core package past the window. Teknium's ruling: "plugins dont have to
-abide by our 14 day rule … Only hermes' dependencies themselves have to." We recommend (not require)
-plugin authors adopt their own quarantine — the developer guide and `plugin-catalog/README.md` carry
-that guidance.
+(core `uv.lock` packages; `pm/workspace.py::_core_release_quarantine` re-anchors the cutoff onto
+each core-locked package, so a plugin cannot drag core past the window). Plugin-only packages are
+not filtered — plugins need not abide by the 14-day rule, though their own quarantine is
+recommended (`plugin-catalog/README.md`).
 
 ## Commits, Merges, PRs
 
@@ -432,30 +429,22 @@ conftest rejects that at collection):
 def test_posix_signal_path(): ...
 ```
 
-Other single-marker forms (each is a complete marker on its own):
-`platforms("windows")` (native Windows only), `platforms("not macos")`
-(anywhere except macOS), `platforms("windows", arch="arm64")` (native Windows
-on arm64), `platforms("posix")` (Linux or macOS).
+Other single-marker forms: `platforms("windows")`, `platforms("not macos")`,
+`platforms("windows", arch="arm64")`, `platforms("posix")`.
 
 Specs: `linux`, `macos`, `windows`, `posix`, `any`, and `not <spec>`.
 The historic `linux_only` / `macos_only` / `windows_only` markers have been
 fully replaced — `platforms` is the only host-gating marker in the tree.
 
-**Live Windows process-topology E2E: the `wine2e` lane.** For claims about
-real Windows process behavior that mocks cannot reproduce (venv-holder
-scans, process-tree parentage, launcher/worker chains, detach semantics),
-there is an on-demand workflow `windows-venv-e2e.yml` that runs
-`tests/hermes_cli/test_venv_holder_windows_live.py` on a real
-`windows-latest` runner — spawning actual processes and driving the real
-detection code, no mocked psutil. It fires ONLY on pushes to `wine2e/**`
-branches (inert on PRs and main; costs nothing on normal work). The proven
-workflow: write probes that pin CORRECT behavior, push to a `wine2e/`
-branch to reproduce the bugs live on unfixed code, build the fix, iterate
-until the lane is green, then open the PR — the live receipt on the exact
-head is the Windows proof reviewers ask for. Extend the live suite when
-touching that subsystem; assert against the gateway ANCESTOR found by
-argv, not the direct parent (the venv shim makes every spawn a
-launcher/worker chain).
+**Live Windows process-topology E2E: the `wine2e` lane.** Claims about real
+Windows process behavior that mocks cannot reproduce are proven by pushing
+probes to a `wine2e/**` branch, which runs the on-demand `windows-venv-e2e.yml`
+workflow (`tests/hermes_cli/test_venv_holder_windows_live.py` on a real
+`windows-latest` runner, driving the real detection code — no mocked psutil);
+iterate until the lane is green, then open the PR. Extend the live suite when
+touching that subsystem; assert against the gateway ANCESTOR found by argv,
+not the direct parent (the venv shim makes every spawn a launcher/worker
+chain).
 
 **Use the marker, never a bare `skipif`.** `scripts/ci/list_os_marked_tests.py`
 decides which files an OS lane imports by resolving the quoted specs inside

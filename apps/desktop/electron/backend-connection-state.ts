@@ -30,6 +30,8 @@ export interface BackendConnectionState<TProcess, TConnection> {
   getProcess(): TProcess | null
   getPromise(): Promise<TConnection> | null
   getPendingPromise(): Promise<TConnection> | null
+  /** The stop still draining (stopProcess in flight, not failed), or null. Await it before startAttempt(). */
+  getPendingStop(): Promise<void> | null
   invalidate(): TProcess | null
   stopProcess(stop: (current: TProcess) => Promise<void>): Promise<void>
 }
@@ -157,6 +159,12 @@ export function createBackendConnectionState<TProcess, TConnection>(): BackendCo
 
     getPendingPromise(): Promise<TConnection> | null {
       return pendingPromise
+    },
+
+    // Same visibility stopProcess() uses to reuse an in-flight stop: callers
+    // can serialize behind it instead of hitting startAttempt()'s refusal.
+    getPendingStop(): Promise<void> | null {
+      return stopping && !stopping.failed ? stopping.completion : null
     },
 
     invalidate,

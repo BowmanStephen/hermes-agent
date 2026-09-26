@@ -109,6 +109,31 @@ test('an invalidated attempt cannot attach a late-spawned process', () => {
   assert.equal(state.getProcess(), null)
 })
 
+test('getPendingStop exposes the draining stop and clears once it settles', async () => {
+  const state = createBackendConnectionState<FakeProcess, string>()
+
+  assert.equal(state.getPendingStop(), null)
+
+  const attempt = state.startAttempt()
+  state.setPromise(attempt, Promise.resolve('ready'))
+  assert.ok(state.attachProcess(attempt, { id: 'current' }))
+
+  const gate = deferred<void>()
+  const stopping = state.stopProcess(async () => {
+    await gate.promise
+  })
+
+  // While the stop drains, startAttempt refuses — and the stop is observable,
+  // so a start can wait for it instead of failing.
+  assert.throws(() => state.startAttempt(), /has not stopped/)
+  assert.equal(state.getPendingStop(), stopping)
+
+  gate.resolve()
+  await stopping
+  assert.equal(state.getPendingStop(), null)
+  assert.doesNotThrow(() => state.startAttempt())
+})
+
 test('a failed primary stop retains its child and blocks a replacement until retry exits', async () => {
   const state = createBackendConnectionState<ChildProcess, string>()
 

@@ -71,6 +71,22 @@ def _messages_app(adapter: APIServerAdapter):
     return app
 
 
+
+def _seed_and_compact(db: SessionDB, sid: str, contents: list[str], keep: int = 2) -> None:
+    """Append alternating user/assistant *contents*, then compact all but the last *keep* rows."""
+    rows = [{"role": ("user", "assistant")[i % 2], "content": c} for i, c in enumerate(contents)]
+    for row in rows:
+        db.append_message(sid, row["role"], row["content"])
+    db.archive_and_compact(
+        sid, [_row("user", STANDALONE_SUMMARY), *rows[-keep:]],
+        watermark=db.get_active_message_watermark(sid), tail_count=keep)
+
+
+async def _message_contents(client: TestClient, sid: str, query: str = "") -> list:
+    response = await client.get(f"/api/sessions/{sid}/messages{query}")
+    assert response.status == 200
+    return [m.get("content") for m in (await response.json())["data"]]
+
 class TestMessageProjection:
     def test_standalone_summary_is_hidden_without_scaffolding(self):
         projected = APIServerAdapter._message_response(
@@ -244,59 +260,33 @@ class TestMessagesEndpointProjection:
         assert "CONTEXT COMPACTION" not in rendered
 
     @pytest.mark.asyncio
-    async def test_messages_endpoint_honours_include_compacted(self, adapter, session_db, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    async def test_messages_endpoint_honours_include_compacted(self, adapter, session_db):
         sid = session_db.create_session("compacted-history", "api_server")
-        for i in range(1, 4):
-            session_db.append_message(sid, "user", f"question {i}")
-            session_db.append_message(sid, "assistant", f"answer {i}")
-        tail = [{"role": "user", "content": "question 3"}, {"role": "assistant", "content": "answer 3"}]
-        session_db.archive_and_compact(
-            sid, [_row("user", STANDALONE_SUMMARY), *tail],
-            watermark=session_db.get_active_message_watermark(sid), tail_count=len(tail))
+        history = [f"{kind} {i}" for i in range(1, 4) for kind in ("question", "answer")]
+        _seed_and_compact(session_db, sid, history)
 
-        async def contents(query: str) -> list:
-            async with TestClient(TestServer(_messages_app(adapter))) as client:
-                response = await client.get(f"/api/sessions/{sid}/messages{query}")
-                assert response.status == 200
-                return [m.get("content") for m in (await response.json())["data"]]
-
-        live = await contents("")
+        async with TestClient(TestServer(_messages_app(adapter))) as client:
+            live = await _message_contents(client, sid)
+            for query in ("?include_compacted=false", "?include_compacted=0"):
+                assert await _message_contents(client, sid, query) == live
+            full = await _message_contents(client, sid, "?include_compacted=true")
         assert "question 1" not in live and "answer 3" in live
-        for query in ("?include_compacted=false", "?include_compacted=0"):
-            assert await contents(query) == live
-        full = await contents("?include_compacted=true")
-        for text in ("question 1", "answer 1", "question 2", "answer 2", "question 3", "answer 3"):
-            assert full.count(text) == 1, (text, full)
-        assert full.index("question 1") < full.index("answer 3")
+        assert [c for c in full if c in history] == history
 
     @pytest.mark.asyncio
-    async def test_include_compacted_keeps_compression_ancestors(self, adapter, session_db, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    async def test_include_compacted_keeps_compression_ancestors(self, adapter, session_db):
         session_db.create_session("rotated-parent", "api_server")
         session_db.append_message("rotated-parent", "user", "parent ask")
         session_db.append_message("rotated-parent", "assistant", "parent answer")
         session_db.end_session("rotated-parent", "compression")
         child = session_db.create_session("rotated-child", "api_server", parent_session_id="rotated-parent")
-        for i in range(1, 3):
-            session_db.append_message(child, "user", f"child question {i}")
-            session_db.append_message(child, "assistant", f"child answer {i}")
-        tail = [{"role": "user", "content": "child question 2"}, {"role": "assistant", "content": "child answer 2"}]
-        session_db.archive_and_compact(
-            child, [_row("user", STANDALONE_SUMMARY), *tail],
-            watermark=session_db.get_active_message_watermark(child), tail_count=len(tail))
+        child_history = [f"child {kind} {i}" for i in range(1, 3) for kind in ("question", "answer")]
+        _seed_and_compact(session_db, child, child_history)
 
-        async def contents(query: str) -> list:
-            async with TestClient(TestServer(_messages_app(adapter))) as client:
-                response = await client.get(f"/api/sessions/{child}/messages{query}")
-                assert response.status == 200
-                return [m.get("content") for m in (await response.json())["data"]]
-
-        live = await contents("")
+        async with TestClient(TestServer(_messages_app(adapter))) as client:
+            live = await _message_contents(client, child)
+            full = await _message_contents(client, child, "?include_compacted=true")
         assert "parent ask" in live and "child answer 2" in live
         assert "child question 1" not in live
-        full = await contents("?include_compacted=true")
-        for text in ("parent ask", "parent answer", "child question 1", "child answer 1",
-                     "child question 2", "child answer 2"):
-            assert full.count(text) == 1, (text, full)
-        assert full.index("parent ask") < full.index("child question 1") < full.index("child answer 2")
+        expected = ["parent ask", "parent answer", *child_history]
+        assert [c for c in full if c in expected] == expected
